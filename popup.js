@@ -111,6 +111,18 @@ function cacheDOMElements() {
  * @param {number} [maxLength=MAX_FILENAME_LENGTH] - Максимально допустимая длина.
  * @returns {string} - Обрезанное или исходное имя файла.
  */
+
+function isYandexArchiveOriginalImageUrl(url) {
+    try {
+        const u = new URL(url);
+        return /^(ya\.ru|yandex\.ru)$/.test(u.hostname) &&
+            u.pathname === "/archive/api/image" &&
+            u.searchParams.get("type") === "original";
+    } catch (e) {
+        return false;
+    }
+}
+
 function truncateFilename(filename, maxLength = MAX_FILENAME_LENGTH) {
     if (filename.length <= maxLength) {
         return filename;
@@ -624,7 +636,10 @@ async function handleDownloadCurrentYA() {
     clearStatus();
     setControlsEnabled(false);
     try {
-        const pageInfo = await requestPageInfoYA(); // Получаем title, pageNumber, totalPages
+        const tab = await getActiveTab();
+        const pageInfo = isYandexArchiveOriginalImageUrl(tab.url)
+            ? null
+            : await requestPageInfoYA(); // Получаем title, pageNumber, totalPages
         setStatus(MESSAGES.CURRENT_PAGE_IMAGE_SEARCH);
 
         // Запрашиваем URL изображения через background script, так как content script мог его не найти
@@ -639,12 +654,17 @@ async function handleDownloadCurrentYA() {
         }
         const imageUrl = resp.data.url;
 
-        let baseFn = `${pageInfo.title} - ${pageInfo.pageNumber}`;
-        if (pageInfo.totalPages !== 'unknown' && pageInfo.totalPages) { // Убедимся, что totalPages не пустая строка
-            baseFn += ` из ${pageInfo.totalPages}`;
+        let filename;
+        if (resp.data.suggestedFilename) {
+            filename = truncateFilename(resp.data.suggestedFilename);
+        } else {
+            let baseFn = `${pageInfo.title} - ${pageInfo.pageNumber}`;
+            if (pageInfo.totalPages !== 'unknown' && pageInfo.totalPages) { // Убедимся, что totalPages не пустая строка
+                baseFn += ` из ${pageInfo.totalPages}`;
+            }
+            // Яндекс.Архив отдает .jfif файлы
+            filename = truncateFilename(baseFn + ".jfif");
         }
-        // Яндекс.Архив отдает .jfif файлы
-        const filename = truncateFilename(baseFn + ".jfif");
 
         setStatus(MESSAGES.DOWNLOADING);
         await downloadFile({ url: imageUrl, filename });
@@ -946,7 +966,7 @@ async function processZipDownloadYA({ title, startPage, endPage, baseUrl }) {
                     continue;
                 }
 
-                const filenameInZip = truncateFilename(`${title} - ${page}.jpeg`, 90); // Имя файла внутри ZIP
+                const filenameInZip = truncateFilename(`${title} - ${page}.jfif`, 90); // Имя файла внутри ZIP
                 zip.file(filenameInZip, actualBlob);
                 setStatus(MESSAGES.ZIP_PAGE_ADDED(page, endPage));
 
