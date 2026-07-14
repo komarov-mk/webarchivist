@@ -3,18 +3,20 @@
   "name": "ВебАрхивист",
   "version": "0.3.4.7",
   "description": "Позволяет автоматизировать скачивание изображений из различных сервисов",
-"permissions": [
+  "permissions": [
     "webRequest",
     "downloads",
     "activeTab",
     "tabs",
-    "notifications",
-	"https://afterliferus.github.io/*"
+    "notifications"
   ],
-
   "host_permissions": [
     "https://ya.ru/archive/*",
-    "https://yandex.ru/archive/*"
+    "https://yandex.ru/archive/*",
+    "https://goskatalog.ru/*",
+    "https://catalog.shm.ru/*",
+    "https://www.prlib.ru/*",
+    "<all_urls>"
   ],
   "background": {
     "service_worker": "background.js"
@@ -27,22 +29,22 @@
     "128": "icon.png"
   },
   "web_accessible_resources": [
-  {
-	"resources": ["jszip.min.js"],
-	"matches": ["<all_urls>"]
-  }
-],
+    {
+      "resources": ["jszip.min.js"],
+      "matches": ["<all_urls>"]
+    }
+  ],
   "content_scripts": [
     {
-    "matches": [
-      "https://ya.ru/archive/*",
-      "https://yandex.ru/archive/*",
-      "https://goskatalog.ru/portal/*",         
-      "https://catalog.shm.ru/*",
-	  "https://www.prlib.ru/item/*"
-    ],
+      "matches": [
+        "https://ya.ru/archive/*",
+        "https://yandex.ru/archive/*",
+        "https://goskatalog.ru/portal/*",
+        "https://catalog.shm.ru/*",
+        "https://www.prlib.ru/item/*"
+      ],
       "js": ["contentScript.js"],
-	  "run_at": "document_idle"
+      "run_at": "document_idle"
     }
   ]
 }
