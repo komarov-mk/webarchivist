@@ -110,17 +110,27 @@ chrome.webRequest.onCompleted.addListener(
     // Проверяем, что URL соответствует API изображений Яндекс.Архива
     if (!details.url.includes("/archive/api/image")) return;
     
+    // Проверяем наличие type=original
+    let hasOriginalType = false;
     let page = "last";
     try {
       const u = new URL(details.url);
       page = u.searchParams.get("page") || "last";
-      console.log(`[Yandex Archive] Перехвачен URL для вкладки ${details.tabId}, страница ${page}: ${details.url}`);
+      hasOriginalType = u.searchParams.get("type") === "original";
+      console.log(`[Yandex Archive] Перехвачен URL для вкладки ${details.tabId}, страница ${page}, type=original: ${hasOriginalType}: ${details.url}`);
     } catch (e) {
       console.error(`[Yandex Archive] Ошибка разбора URL: ${e.message}`);
+      return;
     }
-    // Сохраняем URL как для конкретной страницы, так и как запасной
-    imageUrls.set(`${details.tabId}-${page}`, details.url);
-    imageUrls.set(`${details.tabId}-last`, details.url);
+    
+    // Сохраняем только если есть type=original
+    if (hasOriginalType) {
+      imageUrls.set(`${details.tabId}-${page}`, details.url);
+      imageUrls.set(`${details.tabId}-last`, details.url);
+      console.log(`[Yandex Archive] URL сохранен (type=original найден)`);
+    } else {
+      console.warn(`[Yandex Archive] URL пропущен: отсутствует type=original. Пользователю нужно приблизить изображение.`);
+    }
   },
   {
     urls: [
@@ -134,12 +144,21 @@ chrome.webRequest.onCompleted.addListener(
 function fetchNextImage(tabId, pageNumber, timeoutMs = 10000) {
   console.log(`[Yandex Archive] Ожидаю URL для вкладки ${tabId}, страница ${pageNumber}`);
   
-  // Проверяем наличие запасного URL
+  // Проверяем наличие запасного URL с type=original
   const fallbackKey = `${tabId}-last`;
   const fallbackUrl = imageUrls.get(fallbackKey);
   if (fallbackUrl) {
-    console.log(`[Yandex Archive] Использую запасной URL: ${fallbackUrl}`);
-    return Promise.resolve(fallbackUrl);
+    try {
+      const u = new URL(fallbackUrl);
+      if (u.searchParams.get("type") === "original") {
+        console.log(`[Yandex Archive] Использую запасной URL (type=original): ${fallbackUrl}`);
+        return Promise.resolve(fallbackUrl);
+      } else {
+        console.warn(`[Yandex Archive] Запасной URL без type=original, ожидаю перехват: ${fallbackUrl}`);
+      }
+    } catch (e) {
+      console.error(`[Yandex Archive] Ошибка разбора запасного URL: ${e.message}`);
+    }
   }
   
   // Если запасного URL нет, ждем перехвата
@@ -150,7 +169,14 @@ function fetchNextImage(tabId, pageNumber, timeoutMs = 10000) {
       try {
         const u = new URL(details.url);
         const urlPage = u.searchParams.get("page") || "last";
-        console.log(`[Yandex Archive] Получен URL: ${details.url}, страница ${urlPage}`);
+        const hasOriginal = u.searchParams.get("type") === "original";
+        console.log(`[Yandex Archive] Получен URL: ${details.url}, страница ${urlPage}, type=original: ${hasOriginal}`);
+        
+        if (!hasOriginal) {
+          console.warn(`[Yandex Archive] URL без type=original, пропускаем`);
+          return;
+        }
+        
         if (String(urlPage) === String(pageNumber) || urlPage === "last") {
           done = true;
           chrome.webRequest.onCompleted.removeListener(listener);
@@ -210,9 +236,22 @@ async function downloadPages(tabId, title, startPage, endPage, baseUrl, sendResp
     if (!imageUrl) {
       const key = `${downloadTabId}-${page}`;
       imageUrl = imageUrls.get(key) || imageUrls.get(`${downloadTabId}-last`);
+      // Проверяем type=original для найденного URL
+      if (imageUrl) {
+        try {
+          const u = new URL(imageUrl);
+          if (u.searchParams.get("type") !== "original") {
+            console.warn(`[Yandex Archive] Страница ${page}: найден URL без type=original, пропускаем`);
+            imageUrl = null;
+          }
+        } catch (e) {
+          console.error(`[Yandex Archive] Ошибка разбора URL: ${e.message}`);
+          imageUrl = null;
+        }
+      }
     }
     if (!imageUrl) {
-      console.warn(`[Yandex Archive] Страница ${page}: URL не найден`);
+      console.warn(`[Yandex Archive] Страница ${page}: URL не найден или без type=original`);
       chrome.tabs.remove(downloadTabId);
       continue;
     }
@@ -220,14 +259,32 @@ async function downloadPages(tabId, title, startPage, endPage, baseUrl, sendResp
     let filename = `${title} - ${page}.jpeg`;
     if (filename.length > 100) filename = filename.substring(0, 97) + "...";
 
+    // Определяем расширение файла из URL или Content-Type
+    let fileExt = 'jfif'; // По умолчанию для Яндекс.Архива
+    try {
+      const u = new URL(imageUrl);
+      const contentType = u.searchParams.get('type');
+      // Можно расширить логику определения расширения по query-параметрам или заголовкам
+      fileExt = 'jfif'; // Яндекс.Архив отдает jfif/jpeg
+    } catch (e) {
+      console.warn(`[Yandex Archive] Не удалось определить расширение, используем .jfif`);
+    }
+    
+    // Заменяем расширение в имени файла
+    filename = filename.replace(/\.jpeg$/, `.${fileExt}`);
+
     const downloadId = await new Promise(resolve =>
       chrome.downloads.download(
-        { url: imageUrl, filename },
+        { 
+          url: imageUrl, 
+          filename,
+          saveAs: false
+        },
         id => resolve(id)
       )
     );
     if (!downloadId) {
-      console.error(`[Yandex Archive] Ошибка скачивания страницы ${page}`);
+      console.error(`[Yandex Archive] Ошибка скачивания страницы ${page}: API не вернуло ID`);
       chrome.tabs.remove(downloadTabId);
       continue;
     }
@@ -244,16 +301,38 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
       const tab = tabs[0];
       if (!tab || !/^https?:\/\/(ya\.ru|yandex\.ru)\/archive/.test(tab.url)) {
-        sendResponse({ status: "fail", data: null });
+        sendResponse({ status: "fail", data: null, error: "Не Яндекс.Архив" });
       } else {
         const pn = tab.url.split('/').pop().split('?')[0];
         const key = `${tab.id}-${pn}`;
         const url = imageUrls.get(key) || imageUrls.get(`${tab.id}-last`);
         console.log(`[Yandex Archive] getImageUrl: таб=${tab.id}, страница=${pn}, найден URL=${!!url}`);
-        sendResponse(url
-          ? { status: "success", data: { url } }
-          : { status: "fail", data: null }
-        );
+        
+        if (!url) {
+          sendResponse({ 
+            status: "fail", 
+            data: null, 
+            error: "URL изображения не найден. Приблизьте изображение на странице (зум), чтобы загрузилась версия в оригинальном качестве." 
+          });
+        } else {
+          // Проверяем наличие type=original в URL
+          try {
+            const u = new URL(url);
+            if (u.searchParams.get("type") !== "original") {
+              sendResponse({ 
+                status: "fail", 
+                data: null, 
+                error: "Найден URL без type=original. Приблизьте изображение на странице (зум), чтобы загрузилась версия в оригинальном качестве." 
+              });
+              return;
+            }
+          } catch (e) {
+            sendResponse({ status: "fail", data: null, error: `Ошибка разбора URL: ${e.message}` });
+            return;
+          }
+          
+          sendResponse({ status: "success", data: { url } });
+        }
       }
     });
     return true;
