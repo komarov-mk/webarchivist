@@ -11,8 +11,8 @@
     "notifications"
   ],
   "host_permissions": [
-    "https://ya.ru/archive/*",
-    "https://yandex.ru/archive/*",
+    "*://ya.ru/archive/*",
+    "*://yandex.ru/archive/*",
     "https://goskatalog.ru/*",
     "https://catalog.shm.ru/*",
     "https://www.prlib.ru/*",
@@ -37,8 +37,8 @@
   "content_scripts": [
     {
       "matches": [
-        "https://ya.ru/archive/*",
-        "https://yandex.ru/archive/*",
+        "*://ya.ru/archive/*",
+        "*://yandex.ru/archive/*",
         "https://goskatalog.ru/portal/*",
         "https://catalog.shm.ru/*",
         "https://www.prlib.ru/item/*"

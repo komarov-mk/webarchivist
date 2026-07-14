@@ -107,14 +107,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 chrome.webRequest.onCompleted.addListener(
   details => {
-    if (!details.url.includes("type=original")) return;
+    // Проверяем, что URL соответствует API изображений Яндекс.Архива
+    if (!details.url.includes("/archive/api/image")) return;
+    
     let page = "last";
     try {
       const u = new URL(details.url);
       page = u.searchParams.get("page") || "last";
-      console.log(`Перехвачен URL для вкладки ${details.tabId}, страница ${page}: ${details.url}`);
+      console.log(`[Yandex Archive] Перехвачен URL для вкладки ${details.tabId}, страница ${page}: ${details.url}`);
     } catch (e) {
-      console.error(`Ошибка разбора URL: ${e.message}`);
+      console.error(`[Yandex Archive] Ошибка разбора URL: ${e.message}`);
     }
     // Сохраняем URL как для конкретной страницы, так и как запасной
     imageUrls.set(`${details.tabId}-${page}`, details.url);
@@ -122,21 +124,21 @@ chrome.webRequest.onCompleted.addListener(
   },
   {
     urls: [
-      "https://ya.ru/archive/api/image*",
-      "https://yandex.ru/archive/api/image*"
+      "*://ya.ru/archive/api/image*",
+      "*://yandex.ru/archive/api/image*"
     ]
   }
 );
 
 // Функция для получения следующего изображения
 function fetchNextImage(tabId, pageNumber, timeoutMs = 10000) {
-  console.log(`Ожидаю URL для вкладки ${tabId}, страница ${pageNumber}`);
+  console.log(`[Yandex Archive] Ожидаю URL для вкладки ${tabId}, страница ${pageNumber}`);
   
   // Проверяем наличие запасного URL
   const fallbackKey = `${tabId}-last`;
   const fallbackUrl = imageUrls.get(fallbackKey);
   if (fallbackUrl) {
-    console.log(`Использую запасной URL: ${fallbackUrl}`);
+    console.log(`[Yandex Archive] Использую запасной URL: ${fallbackUrl}`);
     return Promise.resolve(fallbackUrl);
   }
   
@@ -144,26 +146,26 @@ function fetchNextImage(tabId, pageNumber, timeoutMs = 10000) {
   return new Promise(resolve => {
     let done = false;
     const listener = details => {
-      if (done || details.tabId !== tabId || !details.url.includes("type=original")) return;
+      if (done || details.tabId !== tabId || !details.url.includes("/archive/api/image")) return;
       try {
         const u = new URL(details.url);
         const urlPage = u.searchParams.get("page") || "last";
-        console.log(`Получен URL: ${details.url}, страница ${urlPage}`);
+        console.log(`[Yandex Archive] Получен URL: ${details.url}, страница ${urlPage}`);
         if (String(urlPage) === String(pageNumber) || urlPage === "last") {
           done = true;
           chrome.webRequest.onCompleted.removeListener(listener);
           resolve(details.url);
         }
       } catch (e) {
-        console.error(`Ошибка разбора URL в fetchNextImage: ${e.message}`);
+        console.error(`[Yandex Archive] Ошибка разбора URL в fetchNextImage: ${e.message}`);
       }
     };
     chrome.webRequest.onCompleted.addListener(
       listener,
       {
         urls: [
-          "https://ya.ru/archive/api/image*",
-          "https://yandex.ru/archive/api/image*"
+          "*://ya.ru/archive/api/image*",
+          "*://yandex.ru/archive/api/image*"
         ]
       }
     );
@@ -171,7 +173,7 @@ function fetchNextImage(tabId, pageNumber, timeoutMs = 10000) {
       if (!done) {
         done = true;
         chrome.webRequest.onCompleted.removeListener(listener);
-        console.warn(`Тайм-аут: URL для вкладки ${tabId}, страница ${pageNumber} не найден`);
+        console.warn(`[Yandex Archive] Тайм-аут: URL для вкладки ${tabId}, страница ${pageNumber} не найден`);
         resolve(null);
       }
     }, timeoutMs);
@@ -179,13 +181,13 @@ function fetchNextImage(tabId, pageNumber, timeoutMs = 10000) {
 }
 
 async function navigateToPage(tabId, url) {
-  console.log(`Открываю вкладку с URL: ${url}`);
+  console.log(`[Yandex Archive] Открываю вкладку с URL: ${url}`);
   const downloadTab = await chrome.tabs.create({ url, active: false });
   await new Promise(r => {
     const onUpd = (id, info) => {
       if (id === downloadTab.id && info.status === 'complete') {
         chrome.tabs.onUpdated.removeListener(onUpd);
-        console.log(`Вкладка ${downloadTab.id} загружена`);
+        console.log(`[Yandex Archive] Вкладка ${downloadTab.id} загружена`);
         r();
       }
     };
@@ -210,7 +212,7 @@ async function downloadPages(tabId, title, startPage, endPage, baseUrl, sendResp
       imageUrl = imageUrls.get(key) || imageUrls.get(`${downloadTabId}-last`);
     }
     if (!imageUrl) {
-      console.warn(`Страница ${page}: URL не найден`);
+      console.warn(`[Yandex Archive] Страница ${page}: URL не найден`);
       chrome.tabs.remove(downloadTabId);
       continue;
     }
@@ -225,7 +227,7 @@ async function downloadPages(tabId, title, startPage, endPage, baseUrl, sendResp
       )
     );
     if (!downloadId) {
-      console.error(`Ошибка скачивания страницы ${page}`);
+      console.error(`[Yandex Archive] Ошибка скачивания страницы ${page}`);
       chrome.tabs.remove(downloadTabId);
       continue;
     }
@@ -241,12 +243,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "getImageUrl") {
     chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
       const tab = tabs[0];
-      if (!tab || !/^https:\/\/(ya\.ru|yandex\.ru)\/archive/.test(tab.url)) {
+      if (!tab || !/^https?:\/\/(ya\.ru|yandex\.ru)\/archive/.test(tab.url)) {
         sendResponse({ status: "fail", data: null });
       } else {
         const pn = tab.url.split('/').pop().split('?')[0];
         const key = `${tab.id}-${pn}`;
         const url = imageUrls.get(key) || imageUrls.get(`${tab.id}-last`);
+        console.log(`[Yandex Archive] getImageUrl: таб=${tab.id}, страница=${pn}, найден URL=${!!url}`);
         sendResponse(url
           ? { status: "success", data: { url } }
           : { status: "fail", data: null }
@@ -324,5 +327,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  console.log(`[Yandex Archive] Неизвестный тип сообщения: ${message.type}`);
   return false;
 });
