@@ -33,6 +33,16 @@ loadJSZip().catch(err => console.error('Критическая ошибка ин
 
 const imageUrls = new Map();
 
+function isYandexArchiveOriginalImageUrl(url) {
+  try {
+    const u = new URL(url);
+    return /^(ya\.ru|yandex\.ru)$/.test(u.hostname) &&
+      u.pathname === "/archive/api/image" &&
+      u.searchParams.get("type") === "original";
+  } catch (e) {
+    return false;
+  }
+}
 
 
 chrome.tabs.onRemoved.addListener((tabId) => {
@@ -306,7 +316,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const tab = tabs[0];
       if (!tab || !/^https?:\/\/(ya\.ru|yandex\.ru)\/archive/.test(tab.url)) {
         sendResponse({ status: "fail", data: null, error: "Не Яндекс.Архив" });
-      } else if (WebArchivist.isYandexArchiveOriginalImageUrl(tab.url)) {
+      } else if (isYandexArchiveOriginalImageUrl(tab.url)) {
         console.log(`[Yandex Archive] getImageUrl: активная вкладка уже открыта на original image API`);
         sendResponse({ status: "success", data: { url: tab.url, suggestedFilename: "image.jfif" } });
       } else {

@@ -43,6 +43,32 @@ function cacheDOMElements() {
  * @returns {string} - Обрезанное или исходное имя файла.
  */
 
+function isYandexArchiveOriginalImageUrl(url) {
+    try {
+        const u = new URL(url);
+        return /^(ya\.ru|yandex\.ru)$/.test(u.hostname) &&
+            u.pathname === "/archive/api/image" &&
+            u.searchParams.get("type") === "original";
+    } catch (e) {
+        return false;
+    }
+}
+
+function truncateFilename(filename, maxLength = MAX_FILENAME_LENGTH) {
+    if (filename.length <= maxLength) {
+        return filename;
+    }
+    // Учитываем длину суффикса и символов для расширения
+    const maxBaseLength = maxLength - (FILENAME_TRUNCATE_SUFFIX.length + FILENAME_TRUNCATE_KEEP_CHARS);
+    const extensionMatch = filename.match(/\.[^.]+$/);
+    const extension = extensionMatch ? extensionMatch[0] : '';
+    const baseName = filename.substring(0, filename.length - extension.length);
+
+    if (baseName.length > maxBaseLength) {
+        return baseName.substring(0, maxBaseLength) + FILENAME_TRUNCATE_SUFFIX + extension;
+    }
+    return filename; // Теоретически не должно сюда попадать, если filename.length > maxLength
+}
 
 // --- Обертки для Chrome API (промисифицированные) ---
 
