@@ -1,0 +1,56 @@
+{
+  "manifest_version": 3,
+  "name": "ВебАрхивист",
+  "version": "0.3.4.7",
+  "description": "Позволяет автоматизировать скачивание изображений из различных сервисов",
+  "permissions": [
+    "webRequest",
+    "downloads",
+    "activeTab",
+    "tabs",
+    "notifications"
+  ],
+  "host_permissions": [
+    "*://*.ya.ru/*",
+    "*://*.yandex.ru/*",
+    "https://*.goskatalog.ru/*",
+    "https://*.shm.ru/*",
+    "https://*.prlib.ru/*",
+    "https://raw.githubusercontent.com/*" 
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": "icon.png"
+  },
+  "icons": {
+    "128": "icon.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://ya.ru/archive/*",
+        "*://yandex.ru/archive/*"
+      ],
+      "js": ["src/shared.js", "src/content-yandex.js", "contentScript.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://goskatalog.ru/portal/*",
+        "https://catalog.shm.ru/*"
+      ],
+      "js": ["src/shared.js", "src/content-goskatalog.js", "contentScript.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://www.prlib.ru/item/*"
+      ],
+      "js": ["src/shared.js", "src/content-prlib.js", "contentScript.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
