@@ -4,83 +4,14 @@
  */
 
 // --- Константы ---
-const MAX_FILENAME_LENGTH = 100; // Максимальная длина имени файла
-const FILENAME_TRUNCATE_SUFFIX = "..."; // Суффикс для обрезанных имен файлов
-const FILENAME_TRUNCATE_KEEP_CHARS = 4; // Количество символов, сохраняемых для расширения и суффикса
-const PRILIB_TILE_SIZE = 256; // Размер тайла для Президентской библиотеки
-const GITHUB_MANIFEST_URL = 'https://afterliferus.github.io/webarchivist/manifest.json'; // URL манифеста на GitHub
-const GITHUB_REPO_URL = 'https://github.com/AfterLifeRUS/webarchivist/'; // URL репозитория на GitHub
-
-// Конфигурация поддерживаемых сайтов
-const SITES = {
-    YANDEX_ARCHIVE: {
-        regex: /^https:\/\/(ya\.ru|yandex\.ru)\/archive/,
-        name: "Яндекс.Архив",
-        elements: ['downloadBtn', 'downloadAllBtn', 'downloadRangeBtn', 'startPage', 'endPage', 'zipModeContainer', 'rangeInputContainer']
-    },
-    GOSKATALOG: {
-        regex: /^https:\/\/goskatalog\.ru\/portal/,
-        name: "Госкаталог.рф",
-        elements: ['downloadLotBtn']
-    },
-    PRLIB: {
-        regex: /^https:\/\/www\.prlib\.ru\/item/,
-        name: "Президентская библиотека",
-        elements: ['downloadPageBtn', 'startPage', 'endPage', 'rangeInputContainer', 'zipModeContainer']
-    }
-};
-
-// Сообщения для пользователя
-const MESSAGES = {
-    INIT: "Инициализация...",
-    INIT_ERROR: "Ошибка инициализации",
-    UNSUPPORTED_SITE: "Неподдерживаемый сайт",
-    SUPPORTED_SITES_INFO: "SUPPORTED_SITES", // Специальный ключ для setStatus для отображения списка сайтов
-    PAGE_DATA_REQUEST: "Получение данных страницы...",
-    PAGE_DATA_SUCCESS: "Данные страницы получены.",
-    DOC_DATA_REQUEST: "Получение данных документа...",
-    DOC_DATA_SUCCESS: "Данные документа получены.",
-    LOT_DATA_REQUEST: "Получаем данные лота…",
-    LOT_IMAGES_FOUND: (count) => `Найдено изображений: ${count}. Скачиваем…`,
-    LOT_DOWNLOAD_PROGRESS: (downloaded, total) => `Скачано ${downloaded} из ${total} изображений.`,
-    LOT_DOWNLOAD_SUCCESS: "Все изображения лота успешно скачаны!",
-    LOT_DOWNLOAD_PARTIAL: (downloaded, total, failed) => `Скачано ${downloaded} из ${total} изображений. Ошибок: ${failed}.`,
-    CURRENT_PAGE_IMAGE_SEARCH: "Поиск изображения...",
-    DOWNLOADING: "Скачиваю...",
-    DOWNLOAD_COMPLETE: "Готово.",
-    ZIP_PREPARING: (range) => `Подготовка ZIP ${range && range.start ? `(стр. ${range.start}-${range.end})` : 'всего документа'}…`,
-    ZIP_REQUEST_SENT: (start, end) => `Отправка запроса на скачивание стр. ${start}-${end} по отдельности...`,
-    ZIP_REQUEST_CONFIRMED: "Запрос на скачивание отправлен.",
-    ZIP_PAGE_OPENING: (current, total) => `Стр. ${current}/${total}: Открываю...`,
-    ZIP_PAGE_IMAGE_URL_WAIT: (current, total) => `Стр. ${current}/${total}: Ожидаю URL изображения...`,
-    ZIP_PAGE_IMAGE_DOWNLOADING: (current, total) => `Стр. ${current}/${total}: Скачиваю картинку...`,
-    ZIP_PAGE_EMPTY_IMAGE: (current, total) => `Стр. ${current}/${total}: Изображение пустое, пропускаю`,
-    ZIP_PAGE_DUPLICATE_URL: (current, total) => `Стр. ${current}/${total}: Дубликат URL, пропускаю`,
-    ZIP_PAGE_ADDED: (current, total) => `Стр. ${current}/${total}: Добавлено в ZIP.`,
-    ZIP_GENERATING: "Формирую ZIP-файл...",
-    ZIP_GENERATING_PROGRESS: (percent) => `Формирую ZIP: ${percent}%`,
-    ZIP_DOWNLOADING: "Скачиваю ZIP…",
-    ZIP_DOWNLOAD_SUCCESS: "ZIP скачан успешно!",
-    PRLIB_GETTING_SIZES: "Получение размеров изображения...",
-    PRLIB_FINDING_JTL: "Поиск оптимального JTL‑уровня...",
-    PRLIB_FIRST_TILE: "Загрузка первого тайла для определения размеров...",
-    PRLIB_OTHER_TILES: (count) => `Загрузка остальных ${count} тайлов...`,
-    PRLIB_TILE_PROGRESS: (current, total) => `Тайлы: ${current}/${total}`,
-    PRLIB_JPEG_GENERATING: "Формирование итогового JPEG...",
-    PRLIB_COLLECTING_ZIP: (start, end) => `Собираем ZIP для страниц ${start}–${end}…`,
-    PRLIB_PAGE_PROCESSING_ZIP: (current, total) => `Страница ${current}/${total}: формируем изображение…`,
-    PRLIB_PAGE_ADDED_ZIP: (current, total) => `Страница ${current}/${total}: добавлена в ZIP.`,
-    PRLIB_DOWNLOADING_PAGES: (start, end) => `Скачиваем страницы ${start}–${end}…`,
-    PRLIB_PAGE_DOWNLOADING: (current, total) => `Страница ${current}/${total}: скачиваем…`,
-    VERSION_CHECK_ERROR: "Не удалось проверить обновления.",
-    VERSION_LATEST: (version) => `Версия актуальна: ${version}`,
-    VERSION_NEW_AVAILABLE: (latest, current) => `Доступна новая версия: ${latest} (у вас ${current})`,
-    UNKNOWN_ERROR: "Неизвестная ошибка.",
-    PRLIB_DOC_DATA_REQUEST: "Получение данных документа (Президентская библиотека)...",
-    PRLIB_DOC_DATA_SUCCESS: "Данные получены, готово к скачиванию (Президентская библиотека).",
-    PRLIB_DOC_DATA_ERROR: "Не удалось извлечь информацию о документе (Президентская библиотека).",
-    PRLIB_WAIT_TAB_LOAD: "Ожидание полной загрузки страницы (Президентская библиотека)...",
-};
+const { truncateFilename, isYandexArchiveOriginalImageUrl } = WebArchivist;
+const {
+    PRILIB_TILE_SIZE,
+    GITHUB_MANIFEST_URL,
+    GITHUB_REPO_URL,
+    SITES,
+    MESSAGES
+} = WebArchivistPopupConfig;
 
 // --- Глобальное состояние (специфично для Президентской библиотеки) ---
 let prlibCurrentDocumentInfo = null; // Информация о текущем документе Президентской библиотеки
@@ -111,21 +42,7 @@ function cacheDOMElements() {
  * @param {number} [maxLength=MAX_FILENAME_LENGTH] - Максимально допустимая длина.
  * @returns {string} - Обрезанное или исходное имя файла.
  */
-function truncateFilename(filename, maxLength = MAX_FILENAME_LENGTH) {
-    if (filename.length <= maxLength) {
-        return filename;
-    }
-    // Учитываем длину суффикса и символов для расширения
-    const maxBaseLength = maxLength - (FILENAME_TRUNCATE_SUFFIX.length + FILENAME_TRUNCATE_KEEP_CHARS);
-    const extensionMatch = filename.match(/\.[^.]+$/);
-    const extension = extensionMatch ? extensionMatch[0] : '';
-    const baseName = filename.substring(0, filename.length - extension.length);
 
-    if (baseName.length > maxBaseLength) {
-        return baseName.substring(0, maxBaseLength) + FILENAME_TRUNCATE_SUFFIX + extension;
-    }
-    return filename; // Теоретически не должно сюда попадать, если filename.length > maxLength
-}
 
 // --- Обертки для Chrome API (промисифицированные) ---
 
@@ -624,7 +541,10 @@ async function handleDownloadCurrentYA() {
     clearStatus();
     setControlsEnabled(false);
     try {
-        const pageInfo = await requestPageInfoYA(); // Получаем title, pageNumber, totalPages
+        const tab = await getActiveTab();
+        const pageInfo = isYandexArchiveOriginalImageUrl(tab.url)
+            ? null
+            : await requestPageInfoYA(); // Получаем title, pageNumber, totalPages
         setStatus(MESSAGES.CURRENT_PAGE_IMAGE_SEARCH);
 
         // Запрашиваем URL изображения через background script, так как content script мог его не найти
@@ -639,12 +559,17 @@ async function handleDownloadCurrentYA() {
         }
         const imageUrl = resp.data.url;
 
-        let baseFn = `${pageInfo.title} - ${pageInfo.pageNumber}`;
-        if (pageInfo.totalPages !== 'unknown' && pageInfo.totalPages) { // Убедимся, что totalPages не пустая строка
-            baseFn += ` из ${pageInfo.totalPages}`;
+        let filename;
+        if (resp.data.suggestedFilename) {
+            filename = truncateFilename(resp.data.suggestedFilename);
+        } else {
+            let baseFn = `${pageInfo.title} - ${pageInfo.pageNumber}`;
+            if (pageInfo.totalPages !== 'unknown' && pageInfo.totalPages) { // Убедимся, что totalPages не пустая строка
+                baseFn += ` из ${pageInfo.totalPages}`;
+            }
+            // Яндекс.Архив отдает .jfif файлы
+            filename = truncateFilename(baseFn + ".jfif");
         }
-        // Яндекс.Архив отдает .jfif файлы
-        const filename = truncateFilename(baseFn + ".jfif");
 
         setStatus(MESSAGES.DOWNLOADING);
         await downloadFile({ url: imageUrl, filename });
@@ -946,7 +871,7 @@ async function processZipDownloadYA({ title, startPage, endPage, baseUrl }) {
                     continue;
                 }
 
-                const filenameInZip = truncateFilename(`${title} - ${page}.jpeg`, 90); // Имя файла внутри ZIP
+                const filenameInZip = truncateFilename(`${title} - ${page}.jfif`, 90); // Имя файла внутри ZIP
                 zip.file(filenameInZip, actualBlob);
                 setStatus(MESSAGES.ZIP_PAGE_ADDED(page, endPage));
 

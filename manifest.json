@@ -43,7 +43,7 @@
         "https://catalog.shm.ru/*",
         "https://www.prlib.ru/item/*"
       ],
-      "js": ["contentScript.js"],
+      "js": ["src/shared.js", "src/content-prlib.js", "src/content-yandex.js", "src/content-goskatalog.js", "contentScript.js"],
       "run_at": "document_idle"
     }
   ]
