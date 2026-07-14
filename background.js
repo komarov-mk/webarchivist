@@ -1,12 +1,33 @@
 // background.js
-// Динамическая загрузка JSZip
-try {
-  importScripts('jszip.min.js');
-  if (typeof JSZip !== 'function') throw new Error('JSZip не загружен');
-} catch (err) {
-  console.error('Ошибка загрузки JSZip:', err);
-  throw new Error('Не удалось загрузить JSZip');
+// Динамическая загрузка JSZip через ES6 module import
+let JSZip;
+
+async function loadJSZip() {
+  try {
+    // В Manifest V3 используем динамический import с полным URL расширения
+    const jszipUrl = chrome.runtime.getURL('jszip.min.js');
+    
+    // Создаем модуль через eval в контексте service worker
+    const response = await fetch(jszipUrl);
+    const code = await response.text();
+    
+    // Выполняем код и получаем экспортируемый объект
+    eval(code);
+    
+    // JSZip экспортируется как глобальная переменная или через module.exports
+    JSZip = (typeof self.JSZip !== 'undefined') ? self.JSZip : 
+            (typeof globalThis.JSZip !== 'undefined') ? globalThis.JSZip : null;
+    
+    if (typeof JSZip !== 'function') throw new Error('JSZip не загружен');
+    console.log('JSZip успешно загружен');
+  } catch (err) {
+    console.error('Ошибка загрузки JSZip:', err);
+    throw new Error('Не удалось загрузить JSZip');
+  }
 }
+
+// Инициализация JSZip при старте service worker
+loadJSZip().catch(err => console.error('Критическая ошибка инициализации:', err));
 
 const imageUrls = new Map();
 
@@ -19,7 +40,19 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type === 'fetchTile') {
-        fetch(message.url, { mode: 'cors' })
+        // Используем URL API для безопасной конкатенации и валидации URL
+        let safeUrl;
+        try {
+            safeUrl = new URL(message.url);
+        } catch (e) {
+            sendResponse({ status: 'error', error: `Некорректный URL: ${e.message}` });
+            return false;
+        }
+        
+        fetch(safeUrl, { 
+            mode: 'cors',
+            credentials: 'omit'
+        })
             .then(response => {
                 if (!response.ok) {
                     throw new Error(`HTTP ошибка: ${response.status}`);
@@ -32,6 +65,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 reader.onload = () => {
                     sendResponse({ status: 'success', data: reader.result, contentType });
                 };
+                reader.onerror = () => {
+                    sendResponse({ status: 'error', error: 'Ошибка чтения Blob' });
+                };
                 reader.readAsDataURL(blob);
             })
             .catch(error => {
@@ -39,7 +75,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             });
         return true; // Асинхронный ответ
     } else if (message.type === 'fetchJson') {
-        fetch(message.url, { mode: 'cors' })
+        // Используем URL API для безопасной конкатенации и валидации URL
+        let safeUrl;
+        try {
+            safeUrl = new URL(message.url);
+        } catch (e) {
+            sendResponse({ status: 'error', error: `Некорректный URL: ${e.message}` });
+            return false;
+        }
+        
+        fetch(safeUrl, { 
+            mode: 'cors',
+            credentials: 'omit'
+        })
             .then(response => {
                 if (!response.ok) {
                     throw new Error(`HTTP ошибка: ${response.status}`);
@@ -228,8 +276,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const { url } = message.data;
     (async () => {
       try {
-        console.log(`fetchImageBlob: Начинаю загрузку: ${url}`);
-        const response = await fetch(url);
+        // Валидация URL с помощью URL API
+        let safeUrl;
+        try {
+          safeUrl = new URL(url);
+        } catch (e) {
+          throw new Error(`Некорректный URL: ${e.message}`);
+        }
+        
+        console.log(`fetchImageBlob: Начинаю загрузку: ${safeUrl.href}`);
+        const response = await fetch(safeUrl, { 
+          mode: 'cors',
+          credentials: 'omit'
+        });
         console.log(`fetchImageBlob: HTTP статус: ${response.status}`);
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const blob = await response.blob();
