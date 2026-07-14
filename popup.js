@@ -630,7 +630,12 @@ async function handleDownloadCurrentYA() {
         // Запрашиваем URL изображения через background script, так как content script мог его не найти
         const resp = await sendMessageToBackground({ type: "getImageUrl" });
         if (!resp || resp.status !== 'success' || !resp.data?.url) {
-            throw new Error(resp?.error || "Обработчик getImageUrl в background не вернул URL.");
+            const errorMsg = resp?.error || "Обработчик getImageUrl в background не вернул URL.";
+            // Проверяем, нужно ли пользователю приблизить изображение
+            if (errorMsg.includes("type=original") || errorMsg.includes("Приблизьте")) {
+                throw new Error(errorMsg);
+            }
+            throw new Error(errorMsg);
         }
         const imageUrl = resp.data.url;
 
@@ -638,7 +643,8 @@ async function handleDownloadCurrentYA() {
         if (pageInfo.totalPages !== 'unknown' && pageInfo.totalPages) { // Убедимся, что totalPages не пустая строка
             baseFn += ` из ${pageInfo.totalPages}`;
         }
-        const filename = truncateFilename(baseFn + ".jpeg"); // Яндекс.Архив обычно отдает jpeg
+        // Яндекс.Архив отдает .jfif файлы
+        const filename = truncateFilename(baseFn + ".jfif");
 
         setStatus(MESSAGES.DOWNLOADING);
         await downloadFile({ url: imageUrl, filename });
