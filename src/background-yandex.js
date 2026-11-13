@@ -3,6 +3,7 @@
  */
 
 const imageUrls = new Map();
+const collectedNodeIds = new Map(); // "tabId-page" | "tabId-last" -> nodeId (из параметра id запросов /archive/api/image)
 let yandexImageToken = ""; // Хранилище для динамического токена защиты
 
 // Локальный аналог функции проверки URL во избежание конфликтов областей видимости
@@ -22,6 +23,11 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   for (const key of imageUrls.keys()) {
     if (key.startsWith(`${tabId}-`)) {
       imageUrls.delete(key);
+    }
+  }
+  for (const key of collectedNodeIds.keys()) {
+    if (key.startsWith(`${tabId}-`)) {
+      collectedNodeIds.delete(key);
     }
   }
 });
@@ -57,6 +63,13 @@ chrome.webRequest.onCompleted.addListener(
       const u = new URL(details.url);
       page = u.searchParams.get("page") || "last";
       hasOriginalType = u.searchParams.get("type") === "original";
+
+      const nodeId = u.searchParams.get("id");
+      if (nodeId && details.tabId >= 0) {
+        collectedNodeIds.set(`${details.tabId}-${page}`, nodeId);
+        collectedNodeIds.set(`${details.tabId}-last`, nodeId);
+        console.log(`[Yandex Archive] collectedNodeIds: tab ${details.tabId}, страница ${page}, nodeId ${nodeId}`);
+      }
       console.log(`[Yandex Archive] Перехвачен URL для вкладки ${details.tabId}, страница ${page}, type=original: ${hasOriginalType}: ${details.url}`);
     } catch (e) {
       console.error(`[Yandex Archive] Ошибка разбора URL: ${e.message}`);
@@ -112,6 +125,10 @@ async function fetchYandexImageAsBase64(imageUrl, refererUrl) {
   const blob = await response.blob();
 
   // 100% безопасная и быстрая конвертация Blob в Base64 Data URL без переполнения стека
+  return blobToDataUrl(blob);
+}
+
+function blobToDataUrl(blob) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onloadend = () => resolve(reader.result); // reader.result уже содержит полный "data:image/jpeg;base64,..."
@@ -120,10 +137,75 @@ async function fetchYandexImageAsBase64(imageUrl, refererUrl) {
   });
 }
 
+// Загрузка оригинала через API-грант Яндекс.Архива (подход yandex-archive-downloader):
+// POST /archive/api/image-grant {nodeId, type:"original"} -> {url, token},
+// затем GET url с заголовком X-Archive-Image-Token. Не требует приближения (зума) изображения.
+async function fetchOriginalGrant(nodeId, refererUrl) {
+  let origin = "https://yandex.ru";
+  try {
+    if (refererUrl) origin = new URL(refererUrl).origin;
+  } catch (e) {}
+
+  const grantResponse = await fetch(`${origin}/archive/api/image-grant`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    referrer: refererUrl || "https://yandex.ru/archive/",
+    body: JSON.stringify({ nodeId, type: "original" })
+  });
+  if (!grantResponse.ok) {
+    throw new Error(`image-grant: HTTP ${grantResponse.status} ${grantResponse.statusText}`);
+  }
+
+  const grant = await grantResponse.json();
+  if (!grant?.url || !grant?.token) {
+    throw new Error("image-grant: некорректный ответ сервера");
+  }
+
+  const imageResponse = await fetch(grant.url, {
+    headers: { "X-Archive-Image-Token": grant.token },
+    credentials: "include",
+    referrer: refererUrl || "https://yandex.ru/archive/"
+  });
+  const contentType = imageResponse.headers.get("content-type") || "image/jpeg";
+  if (!imageResponse.ok || contentType.includes("json") || contentType.includes("text")) {
+    throw new Error(`image: HTTP ${imageResponse.status} ${imageResponse.statusText}`);
+  }
+
+  return { arrayBuffer: await imageResponse.arrayBuffer(), contentType };
+}
+
+// Определяет nodeId документа для вкладки: сначала из перехваченных запросов,
+// затем из данных Next.js страницы (через content script).
+async function resolveNodeId(tabId, page) {
+  const keys = [];
+  if (page !== undefined && page !== null) keys.push(`${tabId}-${page}`);
+  keys.push(`${tabId}-last`);
+
+  for (const key of keys) {
+    const nodeId = collectedNodeIds.get(key);
+    if (nodeId) return nodeId;
+  }
+
+  try {
+    const res = await chrome.tabs.sendMessage(tabId, { type: "getDocId" });
+    if (res?.data) return res.data;
+  } catch (e) {
+    console.warn("[Yandex Archive] Не удалось получить docId из content script:", e.message);
+  }
+  return null;
+}
+
 // Функция для получения следующего изображения
 function fetchNextImage(tabId, pageNumber, timeoutMs = 10000) {
   console.log(`[Yandex Archive] Ожидаю URL для вкладки ${tabId}, страница ${pageNumber}`);
-  
+
+  // Если nodeId уже перехвачен, оригинал можно получить через image-grant без ожидания зума
+  if (collectedNodeIds.get(`${tabId}-${pageNumber}`) || collectedNodeIds.get(`${tabId}-last`)) {
+    console.log(`[Yandex Archive] nodeId уже известен для вкладки ${tabId}, оригинал будет получен через image-grant`);
+    return Promise.resolve(null);
+  }
+
   const fallbackKey = `${tabId}-last`;
   const fallbackUrl = imageUrls.get(fallbackKey);
   if (fallbackUrl) {
@@ -229,9 +311,22 @@ async function downloadPages(tabId, title, startPage, endPage, baseUrl, sendResp
       }
     }
     if (!imageUrl) {
-      console.warn(`[Yandex Archive] Страница ${page}: URL не найден или без type=original`);
-      chrome.tabs.remove(downloadTabId).catch(() => {});
-      continue;
+      // Фолбэк: оригинал через image-grant по nodeId (подход yandex-archive-downloader)
+      const nodeId = collectedNodeIds.get(`${downloadTabId}-${page}`) || collectedNodeIds.get(`${downloadTabId}-last`) || null;
+      if (!nodeId) {
+        console.warn(`[Yandex Archive] Страница ${page}: URL не найден или без type=original`);
+        chrome.tabs.remove(downloadTabId).catch(() => {});
+        continue;
+      }
+      try {
+        const granted = await fetchOriginalGrant(nodeId, pageUrl);
+        imageUrl = await blobToDataUrl(new Blob([granted.arrayBuffer], { type: granted.contentType }));
+        console.log(`[Yandex Archive] Страница ${page}: оригинал получен через image-grant (nodeId=${nodeId})`);
+      } catch (grantErr) {
+        console.error(`[Yandex Archive] Страница ${page}: image-grant не сработал:`, grantErr);
+        chrome.tabs.remove(downloadTabId).catch(() => {});
+        continue;
+      }
     }
 
     let filename = `${title} - ${page}.jpeg`;
@@ -286,13 +381,28 @@ async function downloadPages(tabId, title, startPage, endPage, baseUrl, sendResp
 // --- Функции-обработчики сообщений, вызываемые из background.js ---
 
 function handleGetImageUrl(sendResponse) {
-  chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
+  chrome.tabs.query({ active: true, currentWindow: true }, async tabs => {
     const tab = tabs[0];
     if (!tab || !/^https?:\/\/(ya\.ru|yandex\.ru)\/archive/.test(tab.url)) {
       sendResponse({ status: "fail", data: null, error: "Не Яндекс.Архив" });
       return;
-    } 
-    
+    }
+
+    // Приоритет: оригинал через image-grant по nodeId (не требует зума изображения)
+    try {
+      const page = tab.url.split('/').pop().split('?')[0];
+      const nodeId = await resolveNodeId(tab.id, page);
+      if (nodeId) {
+        const granted = await fetchOriginalGrant(nodeId, tab.url);
+        const dataUrl = await blobToDataUrl(new Blob([granted.arrayBuffer], { type: granted.contentType }));
+        console.log(`[Yandex Archive] getImageUrl: оригинал получен через image-grant (nodeId=${nodeId})`);
+        sendResponse({ status: "success", data: { url: dataUrl, suggestedFilename: "image.jfif" } });
+        return;
+      }
+    } catch (grantErr) {
+      console.warn("[Yandex Archive] image-grant не сработал, использую перехваченный URL:", grantErr.message);
+    }
+
     let targetUrl = "";
     if (isYandexArchiveOriginalImageUrlLocal(tab.url)) {
       console.log(`[Yandex Archive] getImageUrl: активная вкладка уже открыта на original image API`);
@@ -353,17 +463,44 @@ function handleFetchNextImage(message, sendResponse) {
     return;
   }
   fetchNextImage(tabId, pageNumber).then(url => {
-    sendResponse(url
-      ? { status: "success", data: { url } }
-      : { status: "fail", data: null }
-    );
+    const nodeId = collectedNodeIds.get(`${tabId}-${pageNumber}`) || collectedNodeIds.get(`${tabId}-last`) || null;
+    if (url || nodeId) {
+      sendResponse({ status: "success", data: { url, nodeId } });
+    } else {
+      sendResponse({ status: "fail", data: null });
+    }
   });
 }
 
 function handleFetchImageBlob(message, sendResponse) {
-  const { url } = message.data;
+  const { url, nodeId } = message.data;
   (async () => {
     try {
+      let refererUrl = "https://yandex.ru/archive/";
+      try {
+        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (tabs[0] && tabs[0].url) {
+          refererUrl = tabs[0].url;
+        }
+      } catch (e) {
+        console.warn("Не удалось прочитать активную вкладку для реферера blob:", e);
+      }
+
+      // Приоритет: оригинал через image-grant по nodeId (подход yandex-archive-downloader)
+      if (nodeId) {
+        try {
+          const granted = await fetchOriginalGrant(nodeId, refererUrl);
+          const bytes = new Uint8Array(granted.arrayBuffer);
+          console.log(`fetchImageBlob: оригинал получен через image-grant (nodeId=${nodeId}), размер: ${bytes.length} байт`);
+          sendResponse({ status: "success", data: { blob: Array.from(bytes), contentType: granted.contentType } });
+          return;
+        } catch (grantErr) {
+          console.warn(`fetchImageBlob: image-grant не сработал (${grantErr.message}), использую перехваченный URL`);
+        }
+      }
+
+      if (!url) throw new Error("Не передан URL изображения и не удалось получить nodeId");
+
       let safeUrl;
       try {
         safeUrl = new URL(url);
@@ -378,16 +515,6 @@ function handleFetchImageBlob(message, sendResponse) {
       };
       if (yandexImageToken) {
         headers["x-archive-image-token"] = yandexImageToken;
-      }
-
-      let refererUrl = "https://yandex.ru/archive/";
-      try {
-        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (tabs[0] && tabs[0].url) {
-          refererUrl = tabs[0].url;
-        }
-      } catch (e) {
-        console.warn("Не удалось прочитать активную вкладку для реферера blob:", e);
       }
 
       // Скачиваем бинарник с подменой заголовков (для генерации ZIP-архивов)
