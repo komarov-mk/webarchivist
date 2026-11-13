@@ -106,6 +106,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
+  if (message.type === 'getDocumentMeta') {
+    if (content.yandexArchive && typeof content.yandexArchive.getDocumentMeta === 'function') {
+      sendResponse({ data: content.yandexArchive.getDocumentMeta() });
+    } else {
+      console.warn('Модуль yandexArchive не загружен на этой странице.');
+      sendResponse({ data: null, error: 'Модуль Яндекс.Архива не инициализирован.' });
+    }
+    return false;
+  }
+
   if (message.type === 'getDocId') {
     if (content.yandexArchive && typeof content.yandexArchive.getDocId === 'function') {
       sendResponse({ data: content.yandexArchive.getDocId() });
