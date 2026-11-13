@@ -194,20 +194,21 @@ async function processZipDownloadYA({ title, startPage, endPage, baseUrl }) {
                     data: { tabId: tempTabId, pageNumber: page }
                 });
 
-                if (!imageResponse || imageResponse.status !== 'success' || !imageResponse.data?.url) {
+                if (!imageResponse || imageResponse.status !== 'success' || (!imageResponse.data?.url && !imageResponse.data?.nodeId)) {
                    setStatus(WebArchivistPopupConfig.MESSAGES.ZIP_PAGE_EMPTY_IMAGE(page, endPage), true);
                    continue;
                 }
                 const imageUrl = imageResponse.data.url;
+                const nodeId = imageResponse.data.nodeId || null;
 
-                if (collectedUrls.has(imageUrl)) {
+                if (imageUrl && collectedUrls.has(imageUrl)) {
                     setStatus(WebArchivistPopupConfig.MESSAGES.ZIP_PAGE_DUPLICATE_URL(page, endPage));
                     continue;
                 }
-                collectedUrls.add(imageUrl);
+                if (imageUrl) collectedUrls.add(imageUrl);
 
                 setStatus(WebArchivistPopupConfig.MESSAGES.ZIP_PAGE_IMAGE_DOWNLOADING(page, endPage));
-                const blobResp = await sendMessageToBackground({ type: "fetchImageBlob", data: { url: imageUrl } });
+                const blobResp = await sendMessageToBackground({ type: "fetchImageBlob", data: { url: imageUrl, nodeId } });
 
                 if (blobResp.status !== 'success' || !blobResp.data?.blob) {
                     throw new Error(blobResp?.error || `Не удалось получить Blob для стр. ${page}`);
