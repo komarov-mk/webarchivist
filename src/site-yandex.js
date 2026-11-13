@@ -78,18 +78,45 @@ async function handleDownloadCurrentYA() {
     }
 }
 
+// Запрашивает метаданные документа (title, pageNumber, totalPages, baseUrl,
+// docId, pageNodeIds) из DOM открытой страницы. При недоступности нового
+// сообщения возвращается к прежнему getAllPageInfo.
+async function requestDocumentMetaYA() {
+    setStatus(WebArchivistPopupConfig.MESSAGES.DOC_DATA_REQUEST);
+    setControlsEnabled(false);
+    try {
+        const tab = await getActiveTab();
+        try {
+            const res = await sendMessageToTab(tab.id, { type: "getDocumentMeta" });
+            if (res?.data) {
+                setStatus(WebArchivistPopupConfig.MESSAGES.DOC_DATA_SUCCESS);
+                return res.data;
+            }
+        } catch (metaError) {
+            console.warn("getDocumentMeta недоступен, использую getAllPageInfo:", metaError);
+        }
+        return await requestAllInfoYA();
+    } catch (error) {
+        console.error("Ошибка в requestDocumentMetaYA:", error);
+        setStatus(`Ошибка (Я.Архив): ${error.message}`, true);
+        throw error;
+    } finally {
+        setControlsEnabled(true);
+    }
+}
+
 async function handleDownloadAllYA() {
     clearStatus();
     setControlsEnabled(false);
     setStatus(WebArchivistPopupConfig.MESSAGES.ZIP_PREPARING({}));
 
     try {
-        const { title, totalPages, baseUrl } = await requestAllInfoYA();
+        const { title, totalPages, baseUrl, pageNodeIds } = await requestDocumentMetaYA();
         const total = parseInt(totalPages, 10);
         if (totalPages === "unknown" || isNaN(total) || total <= 0) {
             throw new Error("Общее количество страниц для Яндекс.Архива неизвестно или некорректно.");
         }
-        await processZipDownloadYA({ title, startPage: 1, endPage: total, baseUrl });
+        await processZipDownloadYA({ title, startPage: 1, endPage: total, baseUrl, pageNodeIds });
     } catch (error) {
         console.error("Ошибка при скачивании всего документа (Яндекс.Архив):", error);
         setStatus(`Ошибка ZIP (Я.Архив): ${error.message}`, true);
@@ -110,7 +137,7 @@ async function handleDownloadRangeYA() {
     }
 
     try {
-        const docInfo = await requestAllInfoYA();
+        const docInfo = await requestDocumentMetaYA();
         const total = parseInt(docInfo.totalPages, 10);
 
         if (docInfo.totalPages !== "unknown" && !isNaN(total) && endPage > total) {
@@ -173,39 +200,50 @@ async function navigateToPageAndWaitYA(url, pageNumForLog = '') {
     });
 }
 
-async function processZipDownloadYA({ title, startPage, endPage, baseUrl }) {
+async function processZipDownloadYA({ title, startPage, endPage, baseUrl, pageNodeIds }) {
     if (typeof JSZip !== 'function') throw new Error('Библиотека JSZip не найдена.');
     setControlsEnabled(false);
     setStatus(WebArchivistPopupConfig.MESSAGES.ZIP_PREPARING({ start: startPage, end: endPage }));
     const zip = new JSZip();
     const collectedUrls = new Set();
+    const nodeIds = pageNodeIds && typeof pageNodeIds === "object" ? pageNodeIds : {};
     let tempTabId = null;
 
     try {
         for (let page = startPage; page <= endPage; page++) {
             const pageUrl = `${baseUrl}/${page}`;
-            setStatus(WebArchivistPopupConfig.MESSAGES.ZIP_PAGE_OPENING(page, endPage));
+            const knownNodeId = nodeIds[String(page)] || null;
             try {
-                tempTabId = await navigateToPageAndWaitYA(pageUrl, `${page}/${endPage}`);
-                setStatus(WebArchivistPopupConfig.MESSAGES.ZIP_PAGE_IMAGE_URL_WAIT(page, endPage));
+                let imageUrl = null;
+                let nodeId = null;
 
-                const imageResponse = await sendMessageToBackground({
-                    type: "fetchNextImage",
-                    data: { tabId: tempTabId, pageNumber: page }
-                });
+                if (knownNodeId) {
+                    // nodeId известен из DOM открытой страницы: вкладка не открывается
+                    setStatus(WebArchivistPopupConfig.MESSAGES.ZIP_PAGE_IMAGE_DOWNLOADING(page, endPage));
+                    nodeId = knownNodeId;
+                } else {
+                    setStatus(WebArchivistPopupConfig.MESSAGES.ZIP_PAGE_OPENING(page, endPage));
+                    tempTabId = await navigateToPageAndWaitYA(pageUrl, `${page}/${endPage}`);
+                    setStatus(WebArchivistPopupConfig.MESSAGES.ZIP_PAGE_IMAGE_URL_WAIT(page, endPage));
 
-                if (!imageResponse || imageResponse.status !== 'success' || (!imageResponse.data?.url && !imageResponse.data?.nodeId)) {
-                   setStatus(WebArchivistPopupConfig.MESSAGES.ZIP_PAGE_EMPTY_IMAGE(page, endPage), true);
-                   continue;
+                    const imageResponse = await sendMessageToBackground({
+                        type: "fetchNextImage",
+                        data: { tabId: tempTabId, pageNumber: page }
+                    });
+
+                    if (!imageResponse || imageResponse.status !== 'success' || (!imageResponse.data?.url && !imageResponse.data?.nodeId)) {
+                       setStatus(WebArchivistPopupConfig.MESSAGES.ZIP_PAGE_EMPTY_IMAGE(page, endPage), true);
+                       continue;
+                    }
+                    imageUrl = imageResponse.data.url;
+                    nodeId = imageResponse.data.nodeId || null;
+
+                    if (imageUrl && collectedUrls.has(imageUrl)) {
+                        setStatus(WebArchivistPopupConfig.MESSAGES.ZIP_PAGE_DUPLICATE_URL(page, endPage));
+                        continue;
+                    }
+                    if (imageUrl) collectedUrls.add(imageUrl);
                 }
-                const imageUrl = imageResponse.data.url;
-                const nodeId = imageResponse.data.nodeId || null;
-
-                if (imageUrl && collectedUrls.has(imageUrl)) {
-                    setStatus(WebArchivistPopupConfig.MESSAGES.ZIP_PAGE_DUPLICATE_URL(page, endPage));
-                    continue;
-                }
-                if (imageUrl) collectedUrls.add(imageUrl);
 
                 setStatus(WebArchivistPopupConfig.MESSAGES.ZIP_PAGE_IMAGE_DOWNLOADING(page, endPage));
                 const blobResp = await sendMessageToBackground({ type: "fetchImageBlob", data: { url: imageUrl, nodeId } });
