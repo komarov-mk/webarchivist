@@ -175,6 +175,17 @@ async function fetchOriginalGrant(nodeId, refererUrl) {
   return { arrayBuffer: await imageResponse.arrayBuffer(), contentType };
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Загрузка оригинала по nodeId через image-grant без открытия вкладок
+// (сессия пользователя не прерывается).
+async function downloadViaGrant(nodeId, refererUrl) {
+  const granted = await fetchOriginalGrant(nodeId, refererUrl);
+  return blobToDataUrl(new Blob([granted.arrayBuffer], { type: granted.contentType }));
+}
+
 // Определяет nodeId документа для вкладки: сначала из перехваченных запросов,
 // затем из данных Next.js страницы (через content script).
 async function resolveNodeId(tabId, page) {
@@ -282,8 +293,9 @@ async function navigateToPage(tabId, url) {
   return downloadTab.id;
 }
 
-async function downloadPages(tabId, title, startPage, endPage, baseUrl, sendResponse) {
+async function downloadPages(tabId, title, startPage, endPage, baseUrl, pageNodeIds, sendResponse) {
   let downloaded = 0;
+  const nodeIds = pageNodeIds && typeof pageNodeIds === "object" ? pageNodeIds : {};
 
   for (const key of imageUrls.keys()) {
     if (key.startsWith(`${tabId}-`)) imageUrls.delete(key);
@@ -291,6 +303,32 @@ async function downloadPages(tabId, title, startPage, endPage, baseUrl, sendResp
 
   for (let page = startPage; page <= endPage; page++) {
     const pageUrl = `${baseUrl}/${page}`;
+
+    // Прямая загрузка через image-grant по nodeId из DOM открытой страницы:
+    // временные вкладки не открываются, сессия не прерывается.
+    const knownNodeId = nodeIds[String(page)] || null;
+    if (knownNodeId) {
+      try {
+        const dataUrl = await downloadViaGrant(knownNodeId, pageUrl);
+        let filename = `${title} - ${page}.jfif`;
+        if (filename.length > 100) filename = filename.substring(0, 97) + "...";
+        const downloadId = await new Promise(resolve =>
+          chrome.downloads.download({ url: dataUrl, filename, saveAs: false }, id => resolve(id))
+        );
+        if (downloadId) {
+          downloaded++;
+          console.log(`[Yandex Archive] Страница ${page}: оригинал получен через image-grant без вкладки (nodeId=${knownNodeId})`);
+        } else {
+          console.error(`[Yandex Archive] Страница ${page}: ошибка скачивания, API не вернул ID`);
+        }
+      } catch (grantErr) {
+        console.error(`[Yandex Archive] Страница ${page}: image-grant не сработал:`, grantErr);
+      }
+      await sleep(250);
+      continue;
+    }
+
+    // Фолбэк: прежний механизм с временной вкладкой и ожиданием зума
     const downloadTabId = await navigateToPage(tabId, pageUrl);
 
     let imageUrl = await fetchNextImage(downloadTabId, page);
@@ -347,12 +385,14 @@ async function downloadPages(tabId, title, startPage, endPage, baseUrl, sendResp
     }
 
     let finalDownloadUrl = imageUrl;
-    try {
-      // Пытаемся безопасно скачать картинку в Base64, имитируя легитимного клиента
-      finalDownloadUrl = await fetchYandexImageAsBase64(imageUrl, pageUrl);
-    } catch (fetchErr) {
-      console.error(`[Yandex Archive] Ошибка обхода защиты для страницы ${page}:`, fetchErr);
-      console.warn(`[Yandex Archive] Пробуем прямой метод скачивания (возможна ошибка .txt)...`);
+    if (!imageUrl.startsWith("data:")) {
+      try {
+        // Пытаемся безопасно скачать картинку в Base64, имитируя легитимного клиента
+        finalDownloadUrl = await fetchYandexImageAsBase64(imageUrl, pageUrl);
+      } catch (fetchErr) {
+        console.error(`[Yandex Archive] Ошибка обхода защиты для страницы ${page}:`, fetchErr);
+        console.warn(`[Yandex Archive] Пробуем прямой метод скачивания (возможна ошибка .txt)...`);
+      }
     }
 
     const downloadId = await new Promise(resolve =>
@@ -546,7 +586,7 @@ function handleFetchImageBlob(message, sendResponse) {
 }
 
 function handleDownloadRangeImages(message, sendResponse) {
-  const { title, startPage, endPage, baseUrl } = message.data;
+  const { title, startPage, endPage, baseUrl, pageNodeIds } = message.data;
   const start = parseInt(startPage, 10);
   const end = parseInt(endPage, 10);
   if (isNaN(start) || isNaN(end) || end < start) {
@@ -558,7 +598,7 @@ function handleDownloadRangeImages(message, sendResponse) {
     if (!tab) {
       sendResponse({ status: "fail", error: "Нет активной вкладки" });
     } else {
-      downloadPages(tab.id, title, start, end, baseUrl, sendResponse);
+      downloadPages(tab.id, title, start, end, baseUrl, pageNodeIds, sendResponse);
     }
   });
 }
