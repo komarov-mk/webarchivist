@@ -10,7 +10,8 @@ function cacheDOMElements() {
     console.log("[INIT-UTILS] Запуск cacheDOMElements()...");
     const ids = [
         "downloadBtn", "downloadLotBtn", "downloadAllBtn", "downloadRangeBtn", "downloadPageBtn",
-        "startPage", "endPage", "zipMode", "messageList", "popupHeader"
+        "startPage", "endPage", "zipMode", "messageList", "popupHeader",
+        "progressContainer", "progressBar", "progressText"
     ];
     
     ids.forEach(id => {
@@ -62,6 +63,26 @@ function setStatus(text, isError = false) {
         statusLi.textContent = text;
         statusLi.style.color = isError ? 'red' : (text.includes("Доступна новая версия") ? 'orange' : (text.includes("Версия актуальна") ? 'green' : ''));
     }
+}
+
+// --- Прогресс-бар (визуальное отображение хода скачивания диапазона) ---
+
+function setProgress(percent, text) {
+    const container = domElements.progressContainer || document.getElementById('progressContainer');
+    const bar = domElements.progressBar || document.getElementById('progressBar');
+    const textEl = domElements.progressText || document.getElementById('progressText');
+    if (!container || !bar) return;
+    container.style.display = "";
+    const clamped = Math.max(0, Math.min(100, Number(percent) || 0));
+    bar.style.width = `${clamped}%`;
+    if (textEl && text !== undefined) textEl.textContent = text;
+}
+
+function hideProgress() {
+    const container = domElements.progressContainer || document.getElementById('progressContainer');
+    const bar = domElements.progressBar || document.getElementById('progressBar');
+    if (container) container.style.display = "none";
+    if (bar) bar.style.width = "0%";
 }
 
 function clearStatus() {

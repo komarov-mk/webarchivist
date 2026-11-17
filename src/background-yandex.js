@@ -211,26 +211,13 @@ async function resolveNodeId(tabId, page) {
 function fetchNextImage(tabId, pageNumber, timeoutMs = 10000) {
   console.log(`[Yandex Archive] Ожидаю URL для вкладки ${tabId}, страница ${pageNumber}`);
 
-  // Если nodeId уже перехвачен, оригинал можно получить через image-grant без ожидания зума
-  if (collectedNodeIds.get(`${tabId}-${pageNumber}`) || collectedNodeIds.get(`${tabId}-last`)) {
-    console.log(`[Yandex Archive] nodeId уже известен для вкладки ${tabId}, оригинал будет получен через image-grant`);
+  // Если nodeId уже перехвачен для ЭТОЙ страницы, оригинал можно получить
+  // через image-grant без ожидания зума. Ключ "tabId-last" сознательно не
+  // используем: при последовательной навигации одной вкладки он указывает
+  // на предыдущую страницу.
+  if (collectedNodeIds.get(`${tabId}-${pageNumber}`)) {
+    console.log(`[Yandex Archive] nodeId уже известен для вкладки ${tabId}, страница ${pageNumber}, оригинал будет получен через image-grant`);
     return Promise.resolve(null);
-  }
-
-  const fallbackKey = `${tabId}-last`;
-  const fallbackUrl = imageUrls.get(fallbackKey);
-  if (fallbackUrl) {
-    try {
-      const u = new URL(fallbackUrl);
-      if (u.searchParams.get("type") === "original") {
-        console.log(`[Yandex Archive] Использую запасной URL (type=original): ${fallbackUrl}`);
-        return Promise.resolve(fallbackUrl);
-      } else {
-        console.warn(`[Yandex Archive] Запасной URL без type=original, ожидаю перехват: ${fallbackUrl}`);
-      }
-    } catch (e) {
-      console.error(`[Yandex Archive] Ошибка разбора запасного URL: ${e.message}`);
-    }
   }
   
   return new Promise(resolve => {
@@ -248,7 +235,7 @@ function fetchNextImage(tabId, pageNumber, timeoutMs = 10000) {
           return;
         }
         
-        if (String(urlPage) === String(pageNumber) || urlPage === "last") {
+        if (String(urlPage) === String(pageNumber)) {
           done = true;
           chrome.webRequest.onCompleted.removeListener(listener);
           resolve(details.url);
@@ -277,145 +264,168 @@ function fetchNextImage(tabId, pageNumber, timeoutMs = 10000) {
   });
 }
 
-async function navigateToPage(tabId, url) {
-  console.log(`[Yandex Archive] Открываю вкладку с URL: ${url}`);
-  const downloadTab = await chrome.tabs.create({ url, active: false });
-  await new Promise(r => {
-    const onUpd = (id, info) => {
-      if (id === downloadTab.id && info.status === 'complete') {
+// Прогресс скачивания диапазона -> попап (UI). Если попап закрыт, ошибку игнорируем.
+function sendRangeProgress(data) {
+  try {
+    const p = chrome.runtime.sendMessage({ type: "yaRangeProgress", data });
+    if (p && typeof p.catch === "function") p.catch(() => {});
+  } catch (e) {}
+}
+
+// Очистка перехваченных данных вкладки (перед навигацией на новую страницу,
+// чтобы не смешались nodeId/URL разных страниц).
+function clearTabCaptureState(tabId) {
+  for (const key of Array.from(imageUrls.keys())) {
+    if (key.startsWith(`${tabId}-`)) imageUrls.delete(key);
+  }
+  for (const key of Array.from(collectedNodeIds.keys())) {
+    if (key.startsWith(`${tabId}-`)) collectedNodeIds.delete(key);
+  }
+}
+
+// Навигация ТЕКУЩЕЙ вкладки на URL с ожиданием загрузки (без создания вкладок).
+// Временные вкладки не открываются — работа расширения не сбрасывается.
+function navigateCurrentTab(tabId, url, timeoutMs = 45000) {
+  console.log(`[Yandex Archive] Навигация текущей вкладки ${tabId} на: ${url}`);
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (ok) => {
+      if (!done) {
+        done = true;
         chrome.tabs.onUpdated.removeListener(onUpd);
-        console.log(`[Yandex Archive] Вкладка ${downloadTab.id} загружена`);
-        r();
+        resolve(ok);
+      }
+    };
+    const onUpd = (id, info) => {
+      if (id === tabId && info.status === "complete") {
+        console.log(`[Yandex Archive] Вкладка ${tabId} загрузилась: ${url}`);
+        finish(true);
       }
     };
     chrome.tabs.onUpdated.addListener(onUpd);
+    chrome.tabs.update(tabId, { url }).then(() => {}, () => finish(false));
+    setTimeout(() => finish(false), timeoutMs);
   });
-  return downloadTab.id;
+}
+
+// Ожидание готовности content script после навигации (страница перезагрузилась).
+async function waitForTabReady(tabId, timeoutMs = 25000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const res = await chrome.tabs.sendMessage(tabId, { type: "getDocumentMeta" });
+      if (res?.data) return res.data;
+    } catch (e) {}
+    await sleep(500);
+  }
+  return null;
 }
 
 async function downloadPages(tabId, title, startPage, endPage, baseUrl, pageNodeIds, sendResponse) {
   let downloaded = 0;
-  const nodeIds = pageNodeIds && typeof pageNodeIds === "object" ? pageNodeIds : {};
-
-  for (const key of imageUrls.keys()) {
-    if (key.startsWith(`${tabId}-`)) imageUrls.delete(key);
-  }
+  const total = endPage - startPage + 1;
+  const errors = [];
+  const nodeIds = pageNodeIds && typeof pageNodeIds === "object" ? { ...pageNodeIds } : {};
 
   for (let page = startPage; page <= endPage; page++) {
+    const index = page - startPage + 1;
     const pageUrl = `${baseUrl}/${page}`;
+    const progressBase = { current: index, total, page, downloaded, errorsCount: errors.length };
 
-    // Прямая загрузка через image-grant по nodeId из DOM открытой страницы:
-    // временные вкладки не открываются, сессия не прерывается.
-    const knownNodeId = nodeIds[String(page)] || null;
-    if (knownNodeId) {
-      try {
-        const dataUrl = await downloadViaGrant(knownNodeId, pageUrl);
-        let filename = `${title} - ${page}.jfif`;
-        if (filename.length > 100) filename = filename.substring(0, 97) + "...";
-        const downloadId = await new Promise(resolve =>
-          chrome.downloads.download({ url: dataUrl, filename, saveAs: false }, id => resolve(id))
-        );
-        if (downloadId) {
-          downloaded++;
-          console.log(`[Yandex Archive] Страница ${page}: оригинал получен через image-grant без вкладки (nodeId=${knownNodeId})`);
-        } else {
-          console.error(`[Yandex Archive] Страница ${page}: ошибка скачивания, API не вернул ID`);
-        }
-      } catch (grantErr) {
-        console.error(`[Yandex Archive] Страница ${page}: image-grant не сработал:`, grantErr);
-      }
-      await sleep(250);
-      continue;
-    }
-
-    // Фолбэк: прежний механизм с временной вкладкой и ожиданием зума
-    const downloadTabId = await navigateToPage(tabId, pageUrl);
-
-    let imageUrl = await fetchNextImage(downloadTabId, page);
-    if (!imageUrl) {
-      const key = `${downloadTabId}-${page}`;
-      imageUrl = imageUrls.get(key) || imageUrls.get(`${downloadTabId}-last`);
-      if (imageUrl) {
-        try {
-          const u = new URL(imageUrl);
-          if (u.searchParams.get("type") !== "original") {
-            console.warn(`[Yandex Archive] Страница ${page}: найден URL без type=original, пропускаем`);
-            imageUrl = null;
-          }
-        } catch (e) {
-          console.error(`[Yandex Archive] Ошибка разбора URL: ${e.message}`);
-          imageUrl = null;
-        }
-      }
-    }
-    if (!imageUrl) {
-      // Фолбэк: оригинал через image-grant по nodeId (подход yandex-archive-downloader)
-      const nodeId = collectedNodeIds.get(`${downloadTabId}-${page}`) || collectedNodeIds.get(`${downloadTabId}-last`) || null;
-      if (!nodeId) {
-        console.warn(`[Yandex Archive] Страница ${page}: URL не найден или без type=original`);
-        chrome.tabs.remove(downloadTabId).catch(() => {});
-        continue;
-      }
-      try {
-        const granted = await fetchOriginalGrant(nodeId, pageUrl);
-        imageUrl = await blobToDataUrl(new Blob([granted.arrayBuffer], { type: granted.contentType }));
-        console.log(`[Yandex Archive] Страница ${page}: оригинал получен через image-grant (nodeId=${nodeId})`);
-      } catch (grantErr) {
-        console.error(`[Yandex Archive] Страница ${page}: image-grant не сработал:`, grantErr);
-        chrome.tabs.remove(downloadTabId).catch(() => {});
-        continue;
-      }
-    }
-
-    let filename = `${title} - ${page}.jpeg`;
-    if (filename.length > 100) filename = filename.substring(0, 97) + "...";
-
-    let fileExt = 'jfif'; 
     try {
-      const u = new URL(imageUrl);
-      fileExt = 'jfif'; 
-    } catch (e) {
-      console.warn(`[Yandex Archive] Не удалось определить расширение, используем .jfif`);
-    }
-    
-    filename = filename.replace(/\.jpeg$/, `.${fileExt}`);
-    // На всякий случай страхуемся от расширения .txt
-    if (filename.endsWith(".txt")) {
-      filename = filename.replace(/\.txt$/, ".jfif");
-    }
+      // 1. Открываем страницу документа в ТЕКУЩЕЙ вкладке
+      sendRangeProgress({ ...progressBase, phase: "opening" });
+      clearTabCaptureState(tabId);
+      const navOk = await navigateCurrentTab(tabId, pageUrl);
+      if (!navOk) throw new Error("страница не загрузилась (таймаут)");
 
-    let finalDownloadUrl = imageUrl;
-    if (!imageUrl.startsWith("data:")) {
-      try {
-        // Пытаемся безопасно скачать картинку в Base64, имитируя легитимного клиента
-        finalDownloadUrl = await fetchYandexImageAsBase64(imageUrl, pageUrl);
-      } catch (fetchErr) {
-        console.error(`[Yandex Archive] Ошибка обхода защиты для страницы ${page}:`, fetchErr);
-        console.warn(`[Yandex Archive] Пробуем прямой метод скачивания (возможна ошибка .txt)...`);
+      // 2. Ждём готовности content script и обновляем nodeId сканов из DOM новой страницы
+      const meta = await waitForTabReady(tabId);
+      if (meta?.pageNodeIds && typeof meta.pageNodeIds === "object") {
+        Object.assign(nodeIds, meta.pageNodeIds);
       }
+
+      // 3. Ждём источник оригинала: nodeId (из миниатюр) и/или перехваченный URL
+      //    (авто-зум запускается content script'ом при загрузке страницы)
+      sendRangeProgress({ ...progressBase, phase: "waiting" });
+      let nodeId = nodeIds[String(page)] || null;
+      let originalUrl = null;
+      let zoomTriggered = false;
+      const readCaptured = () => {
+        if (!nodeId) nodeId = collectedNodeIds.get(`${tabId}-${page}`) || null;
+        if (!originalUrl) {
+          const u = imageUrls.get(`${tabId}-${page}`);
+          if (u) {
+            try {
+              if (new URL(u).searchParams.get("type") === "original") originalUrl = u;
+            } catch (e) {}
+          }
+        }
+      };
+      const deadline = Date.now() + 20000;
+      // Фаза A: ждём первый источник (nodeId из миниатюр или URL после зума)
+      while (Date.now() < deadline && !nodeId && !originalUrl) {
+        readCaptured();
+        // Подстраховка: если авто-зум не сработал, запускаем его принудительно
+        if (!nodeId && !originalUrl && !zoomTriggered && Date.now() > deadline - 15000) {
+          zoomTriggered = true;
+          try { await chrome.tabs.sendMessage(tabId, { type: "triggerZoom" }); } catch (e) {}
+        }
+        if (nodeId || originalUrl) break;
+        await sleep(400);
+      }
+      // Фаза B: если nodeId уже есть, даём авто-зуму 3 с догрузить оригинал
+      if (nodeId && !originalUrl) {
+        const graceDeadline = Date.now() + 3000;
+        while (Date.now() < graceDeadline && !originalUrl) {
+          readCaptured();
+          if (originalUrl) break;
+          await sleep(300);
+        }
+      }
+
+      // 4. Скачивание: приоритет у image-grant по nodeId, фолбэк — перехваченный URL
+      sendRangeProgress({ ...progressBase, phase: "downloading" });
+      let dataUrl = null;
+      if (nodeId) {
+        try {
+          dataUrl = await downloadViaGrant(nodeId, pageUrl);
+          console.log(`[Yandex Archive] Страница ${page}: оригинал получен через image-grant (nodeId=${nodeId})`);
+        } catch (grantErr) {
+          console.warn(`[Yandex Archive] Страница ${page}: image-grant не сработал (${grantErr.message}), пробую перехваченный URL`);
+        }
+      }
+      if (!dataUrl && originalUrl) {
+        dataUrl = await fetchYandexImageAsBase64(originalUrl, pageUrl);
+      }
+      if (!dataUrl) {
+        throw new Error("оригинал не получен (нет nodeId и URL оригинала)");
+      }
+
+      let filename = `${title} - ${page}.jfif`;
+      if (filename.length > 100) filename = filename.substring(0, 97) + "...";
+      if (filename.endsWith(".txt")) filename = filename.replace(/\.txt$/, ".jfif");
+
+      const downloadId = await new Promise(resolve =>
+        chrome.downloads.download({ url: dataUrl, filename, saveAs: false }, id => resolve(id))
+      );
+      if (!downloadId) throw new Error("API скачивания не вернул ID");
+
+      downloaded++;
+      console.log(`[Yandex Archive] Страница ${page} скачана (${downloaded}/${total})`);
+      sendRangeProgress({ ...progressBase, downloaded, phase: "pageDone" });
+    } catch (pageErr) {
+      console.error(`[Yandex Archive] Страница ${page}: ошибка:`, pageErr);
+      errors.push({ page, error: pageErr.message });
+      sendRangeProgress({ ...progressBase, phase: "pageError", error: pageErr.message });
     }
 
-    const downloadId = await new Promise(resolve =>
-      chrome.downloads.download(
-        { 
-          url: finalDownloadUrl, 
-          filename,
-          saveAs: false
-        },
-        id => resolve(id)
-      )
-    );
-    if (!downloadId) {
-      console.error(`[Yandex Archive] Ошибка скачивания страницы ${page}: API не вернуло ID`);
-      chrome.tabs.remove(downloadTabId).catch(() => {});
-      continue;
-    }
-
-    downloaded++;
-    chrome.tabs.remove(downloadTabId).catch(() => {});
+    await sleep(400);
   }
 
-  sendResponse({ status: downloaded > 0 ? "success" : "fail" });
+  const status = downloaded === total ? "success" : (downloaded > 0 ? "partial" : "fail");
+  console.log(`[Yandex Archive] Диапазон ${startPage}-${endPage} завершён: скачано ${downloaded}/${total}, ошибок: ${errors.length}`);
+  sendResponse({ status, data: { downloaded, total, errors } });
 }
 
 // --- Функции-обработчики сообщений, вызываемые из background.js ---
@@ -503,13 +513,24 @@ function handleFetchNextImage(message, sendResponse) {
     return;
   }
   fetchNextImage(tabId, pageNumber).then(url => {
-    const nodeId = collectedNodeIds.get(`${tabId}-${pageNumber}`) || collectedNodeIds.get(`${tabId}-last`) || null;
+    const nodeId = collectedNodeIds.get(`${tabId}-${pageNumber}`) || null;
     if (url || nodeId) {
       sendResponse({ status: "success", data: { url, nodeId } });
     } else {
       sendResponse({ status: "fail", data: null });
     }
   });
+}
+
+// Очистка перехваченных данных вкладки (вызывается попапом перед навигацией
+// на очередную страницу в режиме ZIP).
+function handleClearTabCapture(message, sendResponse) {
+  const { tabId } = message.data || {};
+  if (tabId) {
+    clearTabCaptureState(tabId);
+    console.log(`[Yandex Archive] Состояние перехвата вкладки ${tabId} очищено`);
+  }
+  sendResponse({ status: "success" });
 }
 
 function handleFetchImageBlob(message, sendResponse) {

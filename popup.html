@@ -146,6 +146,31 @@
       background: #f1f1f1; /* Цвет трека скроллбара */
     }
 
+    /* Прогресс-бар скачивания диапазона */
+    .progress-track {
+      height: 8px;
+      background-color: #e5e7eb;
+      border-radius: 4px;
+      overflow: hidden;
+      box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.08);
+    }
+
+    #progressBar {
+      height: 100%;
+      width: 0%;
+      background-color: #2563eb;
+      border-radius: 4px;
+      transition: width 0.3s ease;
+    }
+
+    #progressText {
+      font-size: 13px;
+      color: #555;
+      margin-top: 4px;
+      text-align: center;
+      white-space: pre-line;
+    }
+
     /* Стили для кнопки "Обновить" (если она будет добавлена JS) */
     #messageList button#updateExtensionBtn {
         display: block; /* Кнопка обновления будет блочным элементом */
@@ -185,6 +210,13 @@
 
   <ul id="messageList">
     </ul>
+
+<div id="progressContainer" style="display: none;">
+  <div class="progress-track">
+    <div id="progressBar"></div>
+  </div>
+  <div id="progressText"></div>
+</div>
 
 <!-- Базовые библиотеки и конфиги -->
   <script src="jszip.min.js"></script>
