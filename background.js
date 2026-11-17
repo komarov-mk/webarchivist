@@ -51,6 +51,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true; // Асинхронный ответ
   }
 
+  if (message.type === "clearTabCapture") {
+    handleClearTabCapture(message, sendResponse);
+    return false;
+  }
+
   console.log(`[Background] Неизвестный тип сообщения: ${message.type}`);
   return false;
 });

@@ -49,6 +49,22 @@ const MESSAGES = {
     ZIP_PAGE_EMPTY_IMAGE: (current, total) => `Стр. ${current}/${total}: Изображение пустое, пропускаю`,
     ZIP_PAGE_DUPLICATE_URL: (current, total) => `Стр. ${current}/${total}: Дубликат URL, пропускаю`,
     ZIP_PAGE_ADDED: (current, total) => `Стр. ${current}/${total}: Добавлено в ZIP.`,
+    RANGE_PROGRESS: (current, total) => `Скачивание: ${current}/${total}…`,
+    RANGE_PAGE_OPENING: (page, total) => `Стр. ${page}/${total}: открываю в текущей вкладке…`,
+    RANGE_PAGE_WAITING: (page, total) => `Стр. ${page}/${total}: жду оригинал (авто-зум)…`,
+    RANGE_PAGE_DOWNLOADING: (page, total) => `Стр. ${page}/${total}: скачиваю…`,
+    RANGE_PAGE_DONE: (downloaded, total) => `Скачано ${downloaded} из ${total}…`,
+    RANGE_PAGE_ERROR: (page, total, error) => `Стр. ${page}/${total}: ошибка — ${error}`,
+    RANGE_FINISHING: "Завершаю скачивание…",
+    RANGE_DONE_ALL: (downloaded, total) => `Готово! Скачано ${downloaded} из ${total} стр. Ошибок нет.`,
+    RANGE_DONE_PARTIAL: (downloaded, total, errors) => {
+        const list = (errors || []).map(e => `стр. ${e.page}: ${e.error}`).join("; ");
+        return `Скачано ${downloaded} из ${total} стр. Ошибки (${(errors || []).length}): ${list}`;
+    },
+    RANGE_DONE_FAIL: (total, errors) => {
+        const list = (errors || []).map(e => `стр. ${e.page}: ${e.error}`).join("; ");
+        return `Не скачано ни одной страницы (из ${total}). Ошибки: ${list}`;
+    },
     ZIP_GENERATING: "Формирую ZIP-файл...",
     ZIP_GENERATING_PROGRESS: (percent) => `Формирую ZIP: ${percent}%`,
     ZIP_DOWNLOADING: "Скачиваю ZIP…",
