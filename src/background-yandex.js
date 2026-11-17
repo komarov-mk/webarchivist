@@ -323,6 +323,105 @@ async function waitForTabReady(tabId, timeoutMs = 25000) {
   return null;
 }
 
+// Получение оригинала ОДНОЙ страницы: навигация текущей вкладкой, ожидание
+// источника (nodeId/URL через перехват + авто/принудительный зум) и загрузка
+// через image-grant. Общая логика для потоков "отдельные файлы" и "ZIP".
+// Возвращает dataUrl оригинала или бросает ошибку.
+async function fetchPageOriginal(tabId, page, pageUrl, nodeIds, progressBase) {
+  // 1. Открываем страницу документа в ТЕКУЩЕЙ вкладке
+  sendRangeProgress({ ...progressBase, phase: "opening" });
+  clearTabCaptureState(tabId);
+  const navOk = await navigateCurrentTab(tabId, pageUrl);
+  if (!navOk) throw new Error("страница не загрузилась (таймаут)");
+
+  // 2. Ждём готовности content script и обновляем nodeId сканов из DOM новой страницы
+  const meta = await waitForTabReady(tabId);
+  if (meta?.pageNodeIds && typeof meta.pageNodeIds === "object") {
+    Object.assign(nodeIds, meta.pageNodeIds);
+  }
+
+  // 3. Ждём источник оригинала: nodeId (из миниатюр) и/или перехваченный URL
+  //    (авто-зум запускается content script'ом при загрузке страницы)
+  sendRangeProgress({ ...progressBase, phase: "waiting" });
+  let nodeId = nodeIds[String(page)] || null;
+  let originalUrl = null;
+  let zoomTriggered = false;
+  // ВАЖНО: запросы оригинала, инициированные зумом, обычно НЕ содержат параметр page,
+  // поэтому onCompleted сохраняет их под ключом "<tabId>-last". Поскольку перед каждой
+  // навигацией вызывается clearTabCaptureState(tabId), ключ "-last" однозначно относится
+  // к только что загруженной странице — фолбэк на него безопасен.
+  const readCaptured = () => {
+    if (!nodeId) {
+      nodeId = collectedNodeIds.get(`${tabId}-${page}`)
+        || collectedNodeIds.get(`${tabId}-last`)
+        || null;
+    }
+    if (!originalUrl) {
+      const u = imageUrls.get(`${tabId}-${page}`) || imageUrls.get(`${tabId}-last`);
+      if (u) {
+        try {
+          if (new URL(u).searchParams.get("type") === "original") originalUrl = u;
+        } catch (e) {}
+      }
+    }
+  };
+  const deadline = Date.now() + 20000;
+  // Фаза A: ждём первый источник (nodeId из миниатюр или URL после зума)
+  while (Date.now() < deadline && !nodeId && !originalUrl) {
+    readCaptured();
+    // Подстраховка: если авто-зум не сработал, запускаем его принудительно
+    if (!nodeId && !originalUrl && !zoomTriggered && Date.now() > deadline - 15000) {
+      zoomTriggered = true;
+      try { await chrome.tabs.sendMessage(tabId, { type: "triggerZoom" }); } catch (e) {}
+    }
+    if (nodeId || originalUrl) break;
+    await sleep(400);
+  }
+  // Фаза B: если nodeId уже есть, даём авто-зуму 3 с догрузить оригинал
+  if (nodeId && !originalUrl) {
+    const graceDeadline = Date.now() + 3000;
+    while (Date.now() < graceDeadline && !originalUrl) {
+      readCaptured();
+      if (originalUrl) break;
+      await sleep(300);
+    }
+  }
+  // Фаза C: последняя линия защиты — resolveNodeId (exact -> "-last" -> docId из
+  // __NEXT_DATA__ через content script). Зеркалирует рабочий путь "Скачать текущую
+  // страницу": во время цикла в просмотрщике открыта именно страница N, поэтому
+  // грант по документному nodeId возвращает оригинал текущего скана.
+  if (!nodeId) {
+    nodeId = await resolveNodeId(tabId, page);
+    if (nodeId) {
+      console.log(`[Yandex Archive] Страница ${page}: nodeId найден через resolveNodeId (fallback): ${nodeId}`);
+    }
+  }
+  if (!nodeId && !originalUrl) {
+    console.warn(`[Yandex Archive] Страница ${page}: ничего не перехвачено. Ключи captured:`,
+      Array.from(collectedNodeIds.keys()).filter(k => k.startsWith(`${tabId}-`)),
+      Array.from(imageUrls.keys()).filter(k => k.startsWith(`${tabId}-`)));
+  }
+
+  // 4. Скачивание: приоритет у image-grant по nodeId, фолбэк — перехваченный URL
+  sendRangeProgress({ ...progressBase, phase: "downloading" });
+  let dataUrl = null;
+  if (nodeId) {
+    try {
+      dataUrl = await downloadViaGrant(nodeId, pageUrl);
+      console.log(`[Yandex Archive] Страница ${page}: оригинал получен через image-grant (nodeId=${nodeId})`);
+    } catch (grantErr) {
+      console.warn(`[Yandex Archive] Страница ${page}: image-grant не сработал (${grantErr.message}), пробую перехваченный URL`);
+    }
+  }
+  if (!dataUrl && originalUrl) {
+    dataUrl = await fetchYandexImageAsBase64(originalUrl, pageUrl);
+  }
+  if (!dataUrl) {
+    throw new Error("оригинал не получен (нет nodeId и URL оригинала)");
+  }
+  return dataUrl;
+}
+
 async function downloadPages(tabId, title, startPage, endPage, baseUrl, pageNodeIds, sendResponse) {
   let downloaded = 0;
   const total = endPage - startPage + 1;
@@ -335,97 +434,7 @@ async function downloadPages(tabId, title, startPage, endPage, baseUrl, pageNode
     const progressBase = { current: index, total, page, downloaded, errorsCount: errors.length };
 
     try {
-      // 1. Открываем страницу документа в ТЕКУЩЕЙ вкладке
-      sendRangeProgress({ ...progressBase, phase: "opening" });
-      clearTabCaptureState(tabId);
-      const navOk = await navigateCurrentTab(tabId, pageUrl);
-      if (!navOk) throw new Error("страница не загрузилась (таймаут)");
-
-      // 2. Ждём готовности content script и обновляем nodeId сканов из DOM новой страницы
-      const meta = await waitForTabReady(tabId);
-      if (meta?.pageNodeIds && typeof meta.pageNodeIds === "object") {
-        Object.assign(nodeIds, meta.pageNodeIds);
-      }
-
-      // 3. Ждём источник оригинала: nodeId (из миниатюр) и/или перехваченный URL
-      //    (авто-зум запускается content script'ом при загрузке страницы)
-      sendRangeProgress({ ...progressBase, phase: "waiting" });
-      let nodeId = nodeIds[String(page)] || null;
-      let originalUrl = null;
-      let zoomTriggered = false;
-      // ВАЖНО: запросы оригинала, инициированные зумом, обычно НЕ содержат параметр page,
-      // поэтому onCompleted сохраняет их под ключом "<tabId>-last". Поскольку перед каждой
-      // навигацией вызывается clearTabCaptureState(tabId), ключ "-last" однозначно относится
-      // к только что загруженной странице — фолбэк на него безопасен.
-      const readCaptured = () => {
-        if (!nodeId) {
-          nodeId = collectedNodeIds.get(`${tabId}-${page}`)
-            || collectedNodeIds.get(`${tabId}-last`)
-            || null;
-        }
-        if (!originalUrl) {
-          const u = imageUrls.get(`${tabId}-${page}`) || imageUrls.get(`${tabId}-last`);
-          if (u) {
-            try {
-              if (new URL(u).searchParams.get("type") === "original") originalUrl = u;
-            } catch (e) {}
-          }
-        }
-      };
-      const deadline = Date.now() + 20000;
-      // Фаза A: ждём первый источник (nodeId из миниатюр или URL после зума)
-      while (Date.now() < deadline && !nodeId && !originalUrl) {
-        readCaptured();
-        // Подстраховка: если авто-зум не сработал, запускаем его принудительно
-        if (!nodeId && !originalUrl && !zoomTriggered && Date.now() > deadline - 15000) {
-          zoomTriggered = true;
-          try { await chrome.tabs.sendMessage(tabId, { type: "triggerZoom" }); } catch (e) {}
-        }
-        if (nodeId || originalUrl) break;
-        await sleep(400);
-      }
-      // Фаза B: если nodeId уже есть, даём авто-зуму 3 с догрузить оригинал
-      if (nodeId && !originalUrl) {
-        const graceDeadline = Date.now() + 3000;
-        while (Date.now() < graceDeadline && !originalUrl) {
-          readCaptured();
-          if (originalUrl) break;
-          await sleep(300);
-        }
-      }
-      // Фаза C: последняя линия защиты — resolveNodeId (exact -> "-last" -> docId из
-      // __NEXT_DATA__ через content script). Зеркалирует рабочий путь "Скачать текущую
-      // страницу": во время цикла в просмотрщике открыта именно страница N, поэтому
-      // грант по документному nodeId возвращает оригинал текущего скана.
-      if (!nodeId) {
-        nodeId = await resolveNodeId(tabId, page);
-        if (nodeId) {
-          console.log(`[Yandex Archive] Страница ${page}: nodeId найден через resolveNodeId (fallback): ${nodeId}`);
-        }
-      }
-      if (!nodeId && !originalUrl) {
-        console.warn(`[Yandex Archive] Страница ${page}: ничего не перехвачено. Ключи captured:`,
-          Array.from(collectedNodeIds.keys()).filter(k => k.startsWith(`${tabId}-`)),
-          Array.from(imageUrls.keys()).filter(k => k.startsWith(`${tabId}-`)));
-      }
-
-      // 4. Скачивание: приоритет у image-grant по nodeId, фолбэк — перехваченный URL
-      sendRangeProgress({ ...progressBase, phase: "downloading" });
-      let dataUrl = null;
-      if (nodeId) {
-        try {
-          dataUrl = await downloadViaGrant(nodeId, pageUrl);
-          console.log(`[Yandex Archive] Страница ${page}: оригинал получен через image-grant (nodeId=${nodeId})`);
-        } catch (grantErr) {
-          console.warn(`[Yandex Archive] Страница ${page}: image-grant не сработал (${grantErr.message}), пробую перехваченный URL`);
-        }
-      }
-      if (!dataUrl && originalUrl) {
-        dataUrl = await fetchYandexImageAsBase64(originalUrl, pageUrl);
-      }
-      if (!dataUrl) {
-        throw new Error("оригинал не получен (нет nodeId и URL оригинала)");
-      }
+      const dataUrl = await fetchPageOriginal(tabId, page, pageUrl, nodeIds, progressBase);
 
       let filename = `${title} - ${page}.jfif`;
       if (filename.length > 100) filename = filename.substring(0, 97) + "...";
@@ -451,6 +460,88 @@ async function downloadPages(tabId, title, startPage, endPage, baseUrl, pageNode
   const status = downloaded === total ? "success" : (downloaded > 0 ? "partial" : "fail");
   console.log(`[Yandex Archive] Диапазон ${startPage}-${endPage} завершён: скачано ${downloaded}/${total}, ошибок: ${errors.length}`);
   sendResponse({ status, data: { downloaded, total, errors } });
+}
+
+// Скачивание диапазона в ZIP-архив. Вся сборка происходит в background:
+// JSZip уже импортирован через importScripts, байты изображений НЕ передаются
+// через messaging (это ломало ZIP: большие сканы превышали лимит размера
+// сообщения runtime.sendMessage), а попап можно закрыть без риска сорвать
+// загрузку. Прогресс приходит в попап сообщениями yaRangeProgress.
+async function downloadPagesAsZip(tabId, title, startPage, endPage, baseUrl, pageNodeIds, sendResponse) {
+  const total = endPage - startPage + 1;
+  const errors = [];
+  const nodeIds = pageNodeIds && typeof pageNodeIds === "object" ? { ...pageNodeIds } : {};
+  const zip = new JSZip();
+  let downloaded = 0;
+
+  for (let page = startPage; page <= endPage; page++) {
+    const index = page - startPage + 1;
+    const pageUrl = `${baseUrl}/${page}`;
+    const progressBase = { current: index, total, page, downloaded, errorsCount: errors.length };
+
+    try {
+      const dataUrl = await fetchPageOriginal(tabId, page, pageUrl, nodeIds, progressBase);
+
+      let filenameInZip = `${title} - ${page}.jfif`;
+      if (typeof WebArchivist?.truncateFilename === "function") {
+        filenameInZip = WebArchivist.truncateFilename(filenameInZip, 90);
+      } else if (filenameInZip.length > 90) {
+        filenameInZip = filenameInZip.substring(0, 87) + "...";
+      }
+      // dataUrl имеет вид "data:image/jpeg;base64,<...>" — JSZip принимает base64 с флагом { base64: true }
+      zip.file(filenameInZip, dataUrl.split(",")[1], { base64: true });
+
+      downloaded++;
+      console.log(`[Yandex Archive] Страница ${page} добавлена в ZIP (${downloaded}/${total})`);
+      sendRangeProgress({ ...progressBase, downloaded, phase: "pageDone" });
+    } catch (pageErr) {
+      console.error(`[Yandex Archive] Страница ${page}: ошибка:`, pageErr);
+      errors.push({ page, error: pageErr.message });
+      sendRangeProgress({ ...progressBase, phase: "pageError", error: pageErr.message });
+    }
+
+    await sleep(400);
+  }
+
+  if (downloaded === 0) {
+    console.log(`[Yandex Archive] ZIP: не скачано ни одной страницы диапазона ${startPage}-${endPage}`);
+    sendResponse({ status: "fail", data: { downloaded: 0, total, errors } });
+    return;
+  }
+
+  // Сборка архива (в service worker нет URL.createObjectURL, поэтому base64 -> data: URL)
+  sendRangeProgress({ current: total, total, page: endPage, downloaded, errorsCount: errors.length, phase: "zipping" });
+  let zipBase64;
+  try {
+    zipBase64 = await zip.generateAsync({ type: "base64" });
+  } catch (zipErr) {
+    console.error("[Yandex Archive] Ошибка сборки ZIP:", zipErr);
+    errors.push({ page: "-", error: `сборка ZIP: ${zipErr.message}` });
+    sendResponse({ status: "partial", data: { downloaded, total, errors } });
+    return;
+  }
+
+  let zipName = `${title} (Стр. ${startPage}-${endPage}).zip`;
+  if (typeof WebArchivist?.truncateFilename === "function") {
+    zipName = WebArchivist.truncateFilename(zipName);
+  } else if (zipName.length > 100) {
+    zipName = zipName.substring(0, 97) + "...";
+  }
+
+  sendRangeProgress({ current: total, total, page: endPage, downloaded, errorsCount: errors.length, phase: "savingZip" });
+  try {
+    const downloadId = await new Promise(resolve =>
+      chrome.downloads.download({ url: `data:application/zip;base64,${zipBase64}`, filename: zipName, saveAs: false }, id => resolve(id))
+    );
+    if (!downloadId) throw new Error("API скачивания не вернул ID");
+  } catch (dlErr) {
+    console.error("[Yandex Archive] Ошибка сохранения ZIP:", dlErr);
+    errors.push({ page: "-", error: `сохранение ZIP: ${dlErr.message}` });
+  }
+
+  const status = errors.length === 0 ? "success" : "partial";
+  console.log(`[Yandex Archive] ZIP диапазона ${startPage}-${endPage} готов: ${downloaded}/${total}, ошибок: ${errors.length}`);
+  sendResponse({ status, data: { downloaded, total, errors, zipName } });
 }
 
 // --- Функции-обработчики сообщений, вызываемые из background.js ---
@@ -647,6 +738,25 @@ function handleDownloadRangeImages(message, sendResponse) {
       sendResponse({ status: "fail", error: "Нет активной вкладки" });
     } else {
       downloadPages(tab.id, title, start, end, baseUrl, pageNodeIds, sendResponse);
+    }
+  });
+}
+
+// ZIP-версия: та же валидация, но сборка архива идёт в background.
+function handleDownloadRangeZip(message, sendResponse) {
+  const { title, startPage, endPage, baseUrl, pageNodeIds } = message.data;
+  const start = parseInt(startPage, 10);
+  const end = parseInt(endPage, 10);
+  if (isNaN(start) || isNaN(end) || end < start) {
+    sendResponse({ status: "fail", error: "Некорректный диапазон" });
+    return;
+  }
+  chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
+    const tab = tabs[0];
+    if (!tab) {
+      sendResponse({ status: "fail", error: "Нет активной вкладки" });
+    } else {
+      downloadPagesAsZip(tab.id, title, start, end, baseUrl, pageNodeIds, sendResponse);
     }
   });
 }

@@ -3,10 +3,6 @@
 window.WebArchivistDebug?.push("src/site-yandex.js загружен");
 console.log("[DEBUG 4/7] src/site-yandex.js загружен.");
 
-function sleepMs(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 // --- Прогресс скачивания диапазона (сообщения из background) ---
 
 chrome.runtime.onMessage.addListener((message) => {
@@ -39,6 +35,14 @@ function handleRangeProgressYA(p) {
         case "pageError":
             setProgress(Math.round((p.current / p.total) * 100), M.RANGE_PAGE_ERROR(p.page, p.total, p.error));
             setStatus(M.RANGE_PAGE_ERROR(p.page, p.total, p.error), true);
+            break;
+        case "zipping": // ZIP собирается в background
+            setProgress(100, M.ZIP_GENERATING);
+            setStatus(M.ZIP_GENERATING);
+            break;
+        case "savingZip": // архив сохраняется через chrome.downloads
+            setProgress(100, M.ZIP_DOWNLOADING);
+            setStatus(M.ZIP_DOWNLOADING);
             break;
         case "finished":
             setProgress(100, M.RANGE_FINISHING);
@@ -235,154 +239,47 @@ async function handleDownloadRangeYA() {
     }
 }
 
-// Навигация ТЕКУЩЕЙ вкладки на URL с ожиданием загрузки.
-// Временные вкладки не создаются — работа расширения не сбрасывается.
-async function navigateCurrentTabAndWaitYA(tabId, url) {
-    console.log(`Я.Архив: навигация текущей вкладки ${tabId} на ${url}`);
-    await chrome.tabs.update(tabId, { url });
-
-    return new Promise((resolve, reject) => {
-        const timeoutDuration = 45000;
-        let timeoutId = setTimeout(() => {
-            chrome.tabs.onUpdated.removeListener(listener);
-            reject(new Error(`Таймаут загрузки страницы (${url})`));
-        }, timeoutDuration);
-
-        const listener = (changedTabId, changeInfo) => {
-            if (changedTabId === tabId && changeInfo.status === 'complete') {
-                clearTimeout(timeoutId);
-                chrome.tabs.onUpdated.removeListener(listener);
-                setTimeout(() => resolve(tabId), 500);
-            }
-        };
-        chrome.tabs.onUpdated.addListener(listener);
-    });
-}
-
-// Ожидание готовности content script после навигации (страница перезагрузилась).
-async function waitForTabReadyYA(tabId, timeoutMs = 25000) {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-        try {
-            const res = await sendMessageToTab(tabId, { type: "getDocumentMeta" });
-            if (res?.data) return res.data;
-        } catch (e) {}
-        await sleepMs(500);
-    }
-    return null;
-}
-
-// Итоговый отчёт о скачивании (ZIP): ошибки или их отсутствие
-function showZipSummaryYA(zipName, downloaded, total, errors) {
+// Итоговый отчёт о скачивании (ZIP): ошибки или их отсутствие.
+// Результат приходит из background (downloadRangeZip).
+function showZipSummaryYA(result) {
     const M = WebArchivistPopupConfig.MESSAGES;
-    if (errors.length === 0) {
-        setStatus(M.ZIP_DOWNLOAD_SUCCESS);
-        showNotification("Скачивание ZIP", `Файл "${zipName}" скачан: ${downloaded} из ${total} стр., без ошибок.`);
+    const d = result?.data || {};
+    const errs = d.errors || [];
+    hideProgress();
+
+    if (result?.status === "success") {
+        setStatus(M.ZIP_DONE_ALL(d.downloaded, d.total));
+        showNotification("Скачивание ZIP (Я.Архив)", `Архив "${d.zipName}" готов: ${d.downloaded} из ${d.total} стр., без ошибок.`);
+    } else if (result?.status === "partial") {
+        setStatus(M.ZIP_DONE_PARTIAL(d.downloaded, d.total, errs), true);
+        showNotification("Скачивание ZIP (Я.Архив)", `Архив "${d.zipName || "ZIP"}" готов с ошибками: ${d.downloaded} из ${d.total} стр.`);
     } else {
-        const list = errors.map(e => `стр. ${e.page}: ${e.error}`).join("; ");
-        setStatus(`ZIP скачан: ${downloaded} из ${total} стр. Ошибки (${errors.length}): ${list}`, true);
-        showNotification("Скачивание ZIP", `Файл "${zipName}" скачан с ошибками: ${downloaded} из ${total} стр.`);
+        setStatus(M.ZIP_DONE_FAIL(d.total, errs), true);
+        showNotification("Скачивание ZIP (Я.Архив)", "Не удалось скачать ни одну страницу.");
     }
 }
 
+// ZIP-скачивание теперь ЦЕЛИКОМ выполняется в background (downloadRangeZip):
+// JSZip уже импортирован в service worker, байты изображений не передаются
+// через messaging (большие сканы превышали лимит размера сообщения — это и
+// ломало ZIP), а попап можно закрыть без риска сорвать загрузку. Прогресс
+// приходит сообщениями yaRangeProgress (см. handleRangeProgressYA).
 async function processZipDownloadYA({ title, startPage, endPage, baseUrl, pageNodeIds }) {
-    if (typeof JSZip !== 'function') throw new Error('Библиотека JSZip не найдена.');
     setControlsEnabled(false);
-    setStatus(WebArchivistPopupConfig.MESSAGES.ZIP_PREPARING({ start: startPage, end: endPage }));
-    const zip = new JSZip();
-    const nodeIds = pageNodeIds && typeof pageNodeIds === "object" ? { ...pageNodeIds } : {};
-    const errors = [];
+    const M = WebArchivistPopupConfig.MESSAGES;
     const total = endPage - startPage + 1;
-    let downloaded = 0;
-    let tabId = null;
+    setStatus(M.ZIP_PREPARING({ start: startPage, end: endPage }));
+    setProgress(0, M.RANGE_PROGRESS(0, total));
 
     try {
-        const tab = await getActiveTab();
-        tabId = tab.id;
-
-        for (let page = startPage; page <= endPage; page++) {
-            const index = page - startPage + 1;
-            const pageUrl = `${baseUrl}/${page}`;
-            const percent = Math.round(((index - 1) / total) * 100);
-            const M = WebArchivistPopupConfig.MESSAGES;
-
-            try {
-                // 1. Открываем страницу документа в ТЕКУЩЕЙ вкладке
-                setProgress(percent, M.ZIP_PAGE_OPENING(page, endPage));
-                setStatus(M.ZIP_PAGE_OPENING(page, endPage));
-                await sendMessageToBackground({ type: "clearTabCapture", data: { tabId } });
-                await navigateCurrentTabAndWaitYA(tabId, pageUrl);
-
-                // 2. Ждём готовности content script, обновляем nodeId сканов из DOM
-                const meta = await waitForTabReadyYA(tabId);
-                if (meta?.pageNodeIds && typeof meta.pageNodeIds === "object") {
-                    Object.assign(nodeIds, meta.pageNodeIds);
-                }
-
-                // 3. Авто-зум запускается при загрузке страницы; ждём источник
-                //    оригинала: nodeId (из миниатюр) или перехваченный URL
-                setProgress(percent, M.ZIP_PAGE_IMAGE_URL_WAIT(page, endPage));
-                const imageResponse = await sendMessageToBackground({
-                    type: "fetchNextImage",
-                    data: { tabId, pageNumber: page }
-                });
-                const nodeId = nodeIds[String(page)] || imageResponse?.data?.nodeId || null;
-                const imageUrl = imageResponse?.data?.url || null;
-
-                if (!nodeId && !imageUrl) {
-                    throw new Error("оригинал не получен (нет nodeId и URL)");
-                }
-
-                // 4. Скачиваем blob (приоритет у image-grant по nodeId)
-                setProgress(percent, M.ZIP_PAGE_IMAGE_DOWNLOADING(page, endPage));
-                const blobResp = await sendMessageToBackground({ type: "fetchImageBlob", data: { url: imageUrl, nodeId } });
-
-                if (blobResp.status !== 'success' || !blobResp.data?.blob) {
-                    throw new Error(blobResp?.error || `Не удалось получить Blob для стр. ${page}`);
-                }
-                const uint8Array = new Uint8Array(Object.values(blobResp.data.blob));
-                const actualBlob = new Blob([uint8Array], { type: blobResp.data.contentType || "image/jpeg" });
-
-                if (actualBlob.size === 0) {
-                    throw new Error("пустое изображение");
-                }
-
-                const filenameInZip = WebArchivist.truncateFilename(`${title} - ${page}.jfif`, 90);
-                zip.file(filenameInZip, actualBlob);
-                downloaded++;
-                setProgress(Math.round((index / total) * 100), M.ZIP_PAGE_ADDED(page, endPage));
-                setStatus(M.ZIP_PAGE_ADDED(page, endPage));
-
-            } catch (pageError) {
-                console.error(`Ошибка на стр. ${page}:`, pageError);
-                errors.push({ page, error: pageError.message });
-                setProgress(Math.round((index / total) * 100), `Стр. ${page}/${endPage}: ошибка — ${pageError.message}`);
-                setStatus(`Стр. ${page}/${endPage}: ошибка — ${pageError.message}`, true);
-            }
-        }
-
-        if (Object.keys(zip.files).length === 0) throw new Error("Не удалось добавить файлы в ZIP.");
-
-        setStatus(WebArchivistPopupConfig.MESSAGES.ZIP_GENERATING);
-        const zipBlob = await zip.generateAsync({ type: 'blob' }, metadata => {
-            const percent = Math.round(metadata.percent);
-            if (percent % 5 === 0 || percent === 100) {
-                setProgress(100, WebArchivistPopupConfig.MESSAGES.ZIP_GENERATING_PROGRESS(percent));
-            }
+        const result = await sendMessageToBackground({
+            type: "downloadRangeZip",
+            data: { title, startPage, endPage, baseUrl, pageNodeIds }
         });
-
-        const zipName = WebArchivist.truncateFilename(`${title} (Стр. ${startPage}-${endPage}).zip`);
-        const zipUrl = URL.createObjectURL(zipBlob);
-
-        setStatus(WebArchivistPopupConfig.MESSAGES.ZIP_DOWNLOADING);
-        await downloadFile({ url: zipUrl, filename: zipName });
-        URL.revokeObjectURL(zipUrl);
-
-        // Итоговый отчёт: сколько скачано и были ли ошибки
-        showZipSummaryYA(zipName, downloaded, total, errors);
+        showZipSummaryYA(result);
     } catch (zipError) {
-        console.error(zipError);
-        setStatus(`Ошибка ZIP (Яндекс.Архив): ${zipError.message}`, true);
+        console.error("Ошибка ZIP (Я.Архив):", zipError);
+        setStatus(`Ошибка ZIP (Я.Архив): ${zipError.message}`, true);
     } finally {
         hideProgress();
         setControlsEnabled(true);

@@ -69,6 +69,15 @@ const MESSAGES = {
     ZIP_GENERATING_PROGRESS: (percent) => `Формирую ZIP: ${percent}%`,
     ZIP_DOWNLOADING: "Скачиваю ZIP…",
     ZIP_DOWNLOAD_SUCCESS: "ZIP скачан успешно!",
+    ZIP_DONE_ALL: (downloaded, total) => `Готово! ZIP скачан: ${downloaded} из ${total} стр. Ошибок нет.`,
+    ZIP_DONE_PARTIAL: (downloaded, total, errors) => {
+        const list = (errors || []).map(e => `стр. ${e.page}: ${e.error}`).join("; ");
+        return `ZIP скачан: ${downloaded} из ${total} стр. Ошибки (${(errors || []).length}): ${list}`;
+    },
+    ZIP_DONE_FAIL: (total, errors) => {
+        const list = (errors || []).map(e => `стр. ${e.page}: ${e.error}`).join("; ");
+        return `ZIP не создан: не скачано ни одной страницы (из ${total}). Ошибки: ${list}`;
+    },
     PRLIB_GETTING_SIZES: "Получение размеров изображения...",
     PRLIB_FINDING_JTL: "Поиск оптимального JTL‑уровня...",
     PRLIB_FIRST_TILE: "Загрузка первого тайла для определения размеров...",

@@ -51,6 +51,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true; // Асинхронный ответ
   }
 
+  if (message.type === "downloadRangeZip") {
+    handleDownloadRangeZip(message, sendResponse);
+    return true; // Асинхронный ответ
+  }
+
   if (message.type === "clearTabCapture") {
     handleClearTabCapture(message, sendResponse);
     return false;
