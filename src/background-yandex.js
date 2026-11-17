@@ -212,10 +212,10 @@ function fetchNextImage(tabId, pageNumber, timeoutMs = 10000) {
   console.log(`[Yandex Archive] Ожидаю URL для вкладки ${tabId}, страница ${pageNumber}`);
 
   // Если nodeId уже перехвачен для ЭТОЙ страницы, оригинал можно получить
-  // через image-grant без ожидания зума. Ключ "tabId-last" сознательно не
-  // используем: при последовательной навигации одной вкладки он указывает
-  // на предыдущую страницу.
-  if (collectedNodeIds.get(`${tabId}-${pageNumber}`)) {
+  // через image-grant без ожидания зума. Ключ "tabId-last" тоже безопасен:
+  // попап вызывает clearTabCapture перед каждой навигацией, поэтому "-last"
+  // однозначно относится к текущей странице вкладки.
+  if (collectedNodeIds.get(`${tabId}-${pageNumber}`) || collectedNodeIds.get(`${tabId}-last`)) {
     console.log(`[Yandex Archive] nodeId уже известен для вкладки ${tabId}, страница ${pageNumber}, оригинал будет получен через image-grant`);
     return Promise.resolve(null);
   }
@@ -235,7 +235,9 @@ function fetchNextImage(tabId, pageNumber, timeoutMs = 10000) {
           return;
         }
         
-        if (String(urlPage) === String(pageNumber)) {
+        // "last" = запрос оригинала без параметра page (типично для зума):
+        // после clearTabCapture он гарантированно принадлежит текущей странице.
+        if (String(urlPage) === String(pageNumber) || urlPage === "last") {
           done = true;
           chrome.webRequest.onCompleted.removeListener(listener);
           resolve(details.url);
@@ -351,10 +353,18 @@ async function downloadPages(tabId, title, startPage, endPage, baseUrl, pageNode
       let nodeId = nodeIds[String(page)] || null;
       let originalUrl = null;
       let zoomTriggered = false;
+      // ВАЖНО: запросы оригинала, инициированные зумом, обычно НЕ содержат параметр page,
+      // поэтому onCompleted сохраняет их под ключом "<tabId>-last". Поскольку перед каждой
+      // навигацией вызывается clearTabCaptureState(tabId), ключ "-last" однозначно относится
+      // к только что загруженной странице — фолбэк на него безопасен.
       const readCaptured = () => {
-        if (!nodeId) nodeId = collectedNodeIds.get(`${tabId}-${page}`) || null;
+        if (!nodeId) {
+          nodeId = collectedNodeIds.get(`${tabId}-${page}`)
+            || collectedNodeIds.get(`${tabId}-last`)
+            || null;
+        }
         if (!originalUrl) {
-          const u = imageUrls.get(`${tabId}-${page}`);
+          const u = imageUrls.get(`${tabId}-${page}`) || imageUrls.get(`${tabId}-last`);
           if (u) {
             try {
               if (new URL(u).searchParams.get("type") === "original") originalUrl = u;
@@ -382,6 +392,21 @@ async function downloadPages(tabId, title, startPage, endPage, baseUrl, pageNode
           if (originalUrl) break;
           await sleep(300);
         }
+      }
+      // Фаза C: последняя линия защиты — resolveNodeId (exact -> "-last" -> docId из
+      // __NEXT_DATA__ через content script). Зеркалирует рабочий путь "Скачать текущую
+      // страницу": во время цикла в просмотрщике открыта именно страница N, поэтому
+      // грант по документному nodeId возвращает оригинал текущего скана.
+      if (!nodeId) {
+        nodeId = await resolveNodeId(tabId, page);
+        if (nodeId) {
+          console.log(`[Yandex Archive] Страница ${page}: nodeId найден через resolveNodeId (fallback): ${nodeId}`);
+        }
+      }
+      if (!nodeId && !originalUrl) {
+        console.warn(`[Yandex Archive] Страница ${page}: ничего не перехвачено. Ключи captured:`,
+          Array.from(collectedNodeIds.keys()).filter(k => k.startsWith(`${tabId}-`)),
+          Array.from(imageUrls.keys()).filter(k => k.startsWith(`${tabId}-`)));
       }
 
       // 4. Скачивание: приоритет у image-grant по nodeId, фолбэк — перехваченный URL
@@ -513,7 +538,9 @@ function handleFetchNextImage(message, sendResponse) {
     return;
   }
   fetchNextImage(tabId, pageNumber).then(url => {
-    const nodeId = collectedNodeIds.get(`${tabId}-${pageNumber}`) || null;
+    const nodeId = collectedNodeIds.get(`${tabId}-${pageNumber}`)
+      || collectedNodeIds.get(`${tabId}-last`)
+      || null;
     if (url || nodeId) {
       sendResponse({ status: "success", data: { url, nodeId } });
     } else {
