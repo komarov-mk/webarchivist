@@ -96,13 +96,3 @@ webarchivist/
 | `notifications` | Уведомления о завершении скачивания |
 | host-разрешения (ya.ru, yandex.ru, goskatalog.ru, shm.ru, prlib.ru) | Credentialed-запросы к API сайтов из фонового воркера |
 | `raw.githubusercontent.com` | Проверка обновлений |
-
-## Разработка
-
-- Проверка синтаксиса: `node --check <файл>.js`
-- После изменения кода нажмите «Обновить» (↻) на карточке расширения в `chrome://extensions`.
-- Версия задаётся в `manifest.json`; она же используется для проверки обновлений.
-
-## Происхождение
-
-Форк проекта [AfterLifeRUS/webarchivist](https://github.com/AfterLifeRUS/webarchivist/) с расширенной поддержкой Яндекс.Архива (image-grant API, скачивание диапазона без прерывания сессии, сборка ZIP в фоне, ограничение длины имён файлов).
