@@ -436,9 +436,8 @@ async function downloadPages(tabId, title, startPage, endPage, baseUrl, pageNode
     try {
       const dataUrl = await fetchPageOriginal(tabId, page, pageUrl, nodeIds, progressBase);
 
-      let filename = `${title} - ${page}.jfif`;
-      if (filename.length > 100) filename = filename.substring(0, 97) + "...";
-      if (filename.endsWith(".txt")) filename = filename.replace(/\.txt$/, ".jfif");
+      // Номер страницы всегда в конце имени и не обрезается (см. buildLimitedFilename)
+      const filename = buildLimitedFilename(title, ` - ${page}.jfif`, 100);
 
       const downloadId = await new Promise(resolve =>
         chrome.downloads.download({ url: dataUrl, filename, saveAs: false }, id => resolve(id))
@@ -467,6 +466,25 @@ async function downloadPages(tabId, title, startPage, endPage, baseUrl, pageNode
 // через messaging (это ломало ZIP: большие сканы превышали лимит размера
 // сообщения runtime.sendMessage), а попап можно закрыть без риска сорвать
 // загрузку. Прогресс приходит в попап сообщениями yaRangeProgress.
+// Формирование ограниченного по длине имени файла: обрезается ТОЛЬКО название
+// документа, а служебная часть (suffix: " - <стр.>.jfif" / " (Стр. X-Y).zip")
+// сохраняется целиком. Раньше обрезался конец всей строки, из-за чего у длинных
+// названий терялся номер страницы: все файлы в ZIP получали одинаковое имя,
+// перезаписывали друг друга, и в архиве оставалась только последняя страница.
+function buildLimitedFilename(title, suffix, maxLen) {
+  let safeTitle = String(title || "документ");
+  if (typeof WebArchivist?.sanitizeFilename === "function") {
+    safeTitle = WebArchivist.sanitizeFilename(safeTitle);
+  } else {
+    safeTitle = safeTitle.replace(/[\\/:*?"<>|]/g, "_");
+  }
+  const maxTitleLength = Math.max(1, maxLen - suffix.length);
+  if (safeTitle.length > maxTitleLength) {
+    safeTitle = safeTitle.substring(0, maxTitleLength);
+  }
+  return `${safeTitle}${suffix}`;
+}
+
 async function downloadPagesAsZip(tabId, title, startPage, endPage, baseUrl, pageNodeIds, sendResponse) {
   const total = endPage - startPage + 1;
   const errors = [];
@@ -482,12 +500,8 @@ async function downloadPagesAsZip(tabId, title, startPage, endPage, baseUrl, pag
     try {
       const dataUrl = await fetchPageOriginal(tabId, page, pageUrl, nodeIds, progressBase);
 
-      let filenameInZip = `${title} - ${page}.jfif`;
-      if (typeof WebArchivist?.truncateFilename === "function") {
-        filenameInZip = WebArchivist.truncateFilename(filenameInZip, 90);
-      } else if (filenameInZip.length > 90) {
-        filenameInZip = filenameInZip.substring(0, 87) + "...";
-      }
+      // Номер страницы всегда в конце имени и не обрезается (см. buildLimitedFilename)
+      const filenameInZip = buildLimitedFilename(title, ` - ${page}.jfif`, 90);
       // dataUrl имеет вид "data:image/jpeg;base64,<...>" — JSZip принимает base64 с флагом { base64: true }
       zip.file(filenameInZip, dataUrl.split(",")[1], { base64: true });
 
@@ -521,12 +535,8 @@ async function downloadPagesAsZip(tabId, title, startPage, endPage, baseUrl, pag
     return;
   }
 
-  let zipName = `${title} (Стр. ${startPage}-${endPage}).zip`;
-  if (typeof WebArchivist?.truncateFilename === "function") {
-    zipName = WebArchivist.truncateFilename(zipName);
-  } else if (zipName.length > 100) {
-    zipName = zipName.substring(0, 97) + "...";
-  }
+  // Ограничение длины имени архива: обрезается название, диапазон страниц сохраняется
+  const zipName = buildLimitedFilename(title, ` (Стр. ${startPage}-${endPage}).zip`, 100);
 
   sendRangeProgress({ current: total, total, page: endPage, downloaded, errorsCount: errors.length, phase: "savingZip" });
   try {
